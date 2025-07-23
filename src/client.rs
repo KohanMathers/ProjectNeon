@@ -47,7 +47,7 @@ struct ConnectAccept {
     session_id: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Ping {
     timestamp: u64,
 }
@@ -108,6 +108,7 @@ impl PacketPayload {
 impl NeonSocket {
     fn new(addr: &str) -> Result<Self, Error> {
         let socket = UdpSocket::bind(addr)?;
+        socket.set_nonblocking(true)?;
         Ok(NeonSocket { socket })
     }
 
@@ -158,6 +159,8 @@ impl NeonClient {
         println!("Connecting to host at {}", host_addr);
         self.host_addr = Some(host_addr);
 
+        self.socket.socket.set_nonblocking(false)?;
+
         let connect_packet = NeonPacket {
             packet_type: PacketType::ConnectRequest as u8,
             sequence: 1,
@@ -171,6 +174,9 @@ impl NeonClient {
         self.socket.send_packet(&connect_packet, host_addr)?;
 
         let (response, _) = self.socket.receive_packet()?;
+        
+        self.socket.socket.set_nonblocking(true)?;
+        
         if response.packet_type == PacketType::ConnectAccept as u8 {
             self.client_id = Some(response.client_id);
             self.connected = true;
@@ -203,6 +209,7 @@ impl NeonClient {
                 client_id,
                 payload: PacketPayload::Ping(ping),
             };
+            println!("Sending ping at timestamp {}", ping.timestamp); 
             self.send_to_host(&packet)
         } else {
             Err(Error::new(ErrorKind::NotConnected, "No client ID assigned"))
@@ -274,9 +281,13 @@ fn main() {
                 }
             }
             Err(e) => {
-                println!("Error receiving packet: {:?}", e);
-                sleep(Duration::from_millis(10));
+                if e.kind() == ErrorKind::WouldBlock {
+                } else {
+                    println!("Error receiving packet: {:?}", e);
+                }
             }
         }
+        
+        sleep(Duration::from_millis(10));
     }
 }
