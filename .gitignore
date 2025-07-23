@@ -1,3 +1,5 @@
 /target
 playground.rs
 Cargo.lock
+playground.exe
+playground.pdb
