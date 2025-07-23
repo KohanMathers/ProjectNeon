@@ -6,5 +6,9 @@ edition = "2024"
 [dependencies]
 
 [[bin]]
-name = "ProjectNeon"
-path = "main.rs"
+name = "server"
+path = "src/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"

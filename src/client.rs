@@ -1,6 +1,9 @@
 use std::net::{UdpSocket, SocketAddr};
 use std::io::{Error, ErrorKind};
-use std::collections::HashMap;
+use std::time::SystemTime;
+use std::convert::TryInto;
+use std::time::{Instant, Duration};
+use std::thread::sleep;
 
 #[derive(Debug, Clone)]
 struct PacketHeader {
@@ -12,28 +15,24 @@ struct PacketHeader {
 }
 
 #[derive(Debug, Clone)]
+enum PacketPayload {
+    None,
+    Ping(Ping),
+    Pong(Pong),
+    ConnectRequest(ConnectRequest),
+    ConnectAccept(ConnectAccept),
+}
+
+#[derive(Debug, Clone)]
 struct NeonPacket {
     packet_type: u8,
     sequence: u16,
     client_id: u8,
+    payload: PacketPayload,
 }
 
 struct NeonSocket {
     socket: UdpSocket,
-}
-
-#[derive(Debug, Clone)]
-struct ClientInfo {
-    addr: SocketAddr,
-    name: String,
-    connected: bool,
-}
-
-struct NeonHost {
-    socket: NeonSocket,
-    connected_clients: HashMap<u8, ClientInfo>,
-    next_client_id: u8,
-    session_id: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -48,12 +47,62 @@ struct ConnectAccept {
     session_id: u32,
 }
 
+#[derive(Debug, Clone)]
+struct Ping {
+    timestamp: u64,
+}
+
+#[derive(Debug, Clone)]
+struct Pong {
+    original_timestamp: u64,
+}
+
 struct NeonClient {
     socket: NeonSocket,
     host_addr: Option<SocketAddr>,
     client_id: Option<u8>,
     connected: bool,
     name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
+enum PacketType {
+    ConnectRequest = 0x01,
+    ConnectAccept = 0x02,
+    Ping = 0x0B,
+    Pong = 0x0C,
+}
+
+impl PacketPayload {
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            PacketPayload::None => vec![],
+            PacketPayload::Ping(ping) => ping.timestamp.to_le_bytes().to_vec(),
+            PacketPayload::Pong(pong) => pong.original_timestamp.to_le_bytes().to_vec(),
+            _ => vec![],
+        }
+    }
+
+    fn from_bytes(packet_type: u8, data: &[u8]) -> Result<Self, Error> {
+        match packet_type {
+            x if x == PacketType::Ping as u8 => {
+                if data.len() < 8 {
+                    return Err(Error::new(ErrorKind::InvalidData, "Ping too short"));
+                }
+                let timestamp = u64::from_le_bytes(data[0..8].try_into().unwrap());
+                Ok(PacketPayload::Ping(Ping { timestamp }))
+            }
+            x if x == PacketType::Pong as u8 => {
+                if data.len() < 8 {
+                    return Err(Error::new(ErrorKind::InvalidData, "Pong too short"));
+                }
+                let timestamp = u64::from_le_bytes(data[0..8].try_into().unwrap());
+                Ok(PacketPayload::Pong(Pong { original_timestamp: timestamp }))
+            }
+            _ => Ok(PacketPayload::None),
+        }
+    }
 }
 
 impl NeonSocket {
@@ -70,7 +119,8 @@ impl NeonSocket {
             sequence: packet.sequence,
             client_id: packet.client_id,
         };
-        let bytes = header.to_bytes();
+        let mut bytes = header.to_bytes();
+        bytes.extend(packet.payload.to_bytes());
         self.socket.send_to(&bytes, addr)?;
         Ok(())
     }
@@ -78,86 +128,17 @@ impl NeonSocket {
     fn receive_packet(&self) -> Result<(NeonPacket, SocketAddr), Error> {
         let mut buf = [0; 1024];
         let (size, addr) = self.socket.recv_from(&mut buf)?;
-        let header = PacketHeader::from_bytes(&buf[..size])?;
-        Ok((NeonPacket {
-            packet_type: header.packet_type,
-            sequence: header.sequence,
-            client_id: header.client_id,
-        }, addr))
-    }
-}
-
-impl NeonHost {
-    fn new(addr: &str) -> Result<Self, Error> {
-        let socket = NeonSocket::new(addr)?;
-        Ok(NeonHost {
-            socket,
-            connected_clients: HashMap::new(),
-            next_client_id: 1,
-            session_id: 12345,
-        })
-    }
-
-    fn listen_for_connections(&mut self) -> Result<(), Error> {
-        println!("Host listening for connections...");
-        loop {
-            let (packet, addr) = self.socket.receive_packet()?;
-            match packet.packet_type {
-                x if x == PacketType::ConnectRequest as u8 => {
-                    println!("Received connection request from {}", addr);
-                    self.handle_connect_request(addr)?;
-                }
-                x if x == PacketType::Ping as u8 => {
-                    println!("Received ping from client {}, responding with pong", packet.client_id);
-                    self.socket.send_packet(&NeonPacket {
-                        packet_type: PacketType::Pong as u8,
-                        sequence: packet.sequence,
-                        client_id: packet.client_id,
-                    }, addr)?;
-                }
-                _ => {
-                    println!("Received unknown packet type: {}", packet.packet_type);
-                }
-            }
-        }
-    }
-
-    fn handle_connect_request(&mut self, from: SocketAddr) -> Result<(), Error> {
-        if self.next_client_id >= 255 {
-            println!("Server full, rejecting connection from {}", from);
-            // TODO: Send ConnectDeny packet
-            return Ok(());
-        }
-
-        let client_id = self.next_client_id;
-        self.next_client_id += 1;
-
-        // Add client to our list
-        self.connected_clients.insert(client_id, ClientInfo {
-            addr: from,
-            name: format!("Client{}", client_id),
-            connected: true,
-        });
-
-        // Send ConnectAccept
-        let accept_packet = NeonPacket {
-            packet_type: PacketType::ConnectAccept as u8,
-            sequence: 0,
-            client_id,
-        };
-
-        self.socket.send_packet(&accept_packet, from)?;
-        println!("Accepted client {} from {}", client_id, from);
-        Ok(())
-    }
-
-    fn broadcast_to_clients(&self, packet: &NeonPacket) -> Result<(), Error> {
-        for client in self.connected_clients.values() {
-            if client.connected {
-                self.socket.send_packet(packet, client.addr)?;
-            }
-        }
-        Ok(())
+        let header = PacketHeader::from_bytes(&buf[..7])?;
+        let payload = PacketPayload::from_bytes(header.packet_type, &buf[7..size])?;
+        Ok((
+            NeonPacket {
+                packet_type: header.packet_type,
+                sequence: header.sequence,
+                client_id: header.client_id,
+                payload,
+            },
+            addr,
+        ))
     }
 }
 
@@ -181,6 +162,10 @@ impl NeonClient {
             packet_type: PacketType::ConnectRequest as u8,
             sequence: 1,
             client_id: 0,
+            payload: PacketPayload::ConnectRequest(ConnectRequest {
+                client_version: 1,
+                desired_name: self.name.clone(),
+            }),
         };
 
         self.socket.send_packet(&connect_packet, host_addr)?;
@@ -206,25 +191,23 @@ impl NeonClient {
 
     fn send_ping(&self) -> Result<(), Error> {
         if let Some(client_id) = self.client_id {
-            let ping_packet = NeonPacket {
-                packet_type: PacketType::Ping as u8,
-                sequence: 1,
-                client_id,
+            let ping = Ping {
+                timestamp: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
             };
-            self.send_to_host(&ping_packet)
+            let packet = NeonPacket {
+                packet_type: PacketType::Ping as u8,
+                sequence: 0,
+                client_id,
+                payload: PacketPayload::Ping(ping),
+            };
+            self.send_to_host(&packet)
         } else {
             Err(Error::new(ErrorKind::NotConnected, "No client ID assigned"))
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u8)]
-enum PacketType {
-    ConnectRequest = 0x01,
-    ConnectAccept = 0x02,
-    Ping = 0x0B,
-    Pong = 0x0C,
 }
 
 impl PacketHeader {
@@ -242,12 +225,12 @@ impl PacketHeader {
         if data.len() < 7 {
             return Err(Error::new(ErrorKind::InvalidData, "Data too short"));
         }
-        
+
         let magic = u16::from_le_bytes([data[0], data[1]]);
         if magic != 0x4E45 {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid magic number"));
         }
-        
+
         let version = data[2];
         let packet_type = data[3];
         let sequence = u16::from_le_bytes([data[4], data[5]]);
@@ -264,29 +247,36 @@ impl PacketHeader {
 }
 
 fn main() {
-    println!("Project Neon Alpha Build 2");
-    
-    println!("Basic packet test:");
-    let packet = NeonPacket {
-        packet_type: PacketType::Ping as u8,
-        sequence: 1,
-        client_id: 1,
-    };
-    println!("Created packet: {:?}", packet);
+    println!("Project Neon Alpha Build 2 - Client");
+    println!("Starting client...");
+    let mut client = NeonClient::new("TestClient".to_string()).expect("Failed to create client");
+    let host_addr = "127.0.0.1:7777".parse().expect("Invalid host address");
+    client.connect_to_host(host_addr).expect("Failed to connect");
 
-    // Server test
-    /*
-    println!("\nStarting host...");
-    let mut host = NeonHost::new("127.0.0.1:7777").unwrap();
-    host.listen_for_connections().unwrap();
-    */
+    let ping_interval = Duration::from_secs(5);
+    let mut last_ping = Instant::now() - ping_interval;
 
-    // Client test
-    /*
-    println!("\nStarting client...");
-    let mut client = NeonClient::new("TestClient".to_string()).unwrap();
-    let host_addr = "127.0.0.1:7777".parse().unwrap();
-    client.connect_to_host(host_addr).unwrap();
-    client.send_ping().unwrap();
-    */
+    loop {
+        if last_ping.elapsed() >= ping_interval {
+            client.send_ping().expect("Ping failed");
+            last_ping = Instant::now();
+        }
+
+        match client.socket.receive_packet() {
+            Ok((packet, _)) => {
+                match packet.packet_type {
+                    x if x == PacketType::Pong as u8 => {
+                        if let PacketPayload::Pong(pong) = packet.payload {
+                            println!("Received pong with timestamp: {}", pong.original_timestamp);
+                        }
+                    }
+                    _ => println!("Received unexpected packet: {:?}", packet),
+                }
+            }
+            Err(e) => {
+                println!("Error receiving packet: {:?}", e);
+                sleep(Duration::from_millis(10));
+            }
+        }
+    }
 }
