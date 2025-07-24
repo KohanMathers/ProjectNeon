@@ -3,6 +3,8 @@ use std::io::{Error, ErrorKind};
 use std::collections::HashMap;
 use std::convert::TryInto;
 
+use bitflags::bitflags;
+
 #[derive(Debug, Clone)]
 struct PacketHeader {
     magic: u16,
@@ -19,6 +21,7 @@ enum PacketPayload {
     Pong(Pong),
     ConnectRequest(ConnectRequest),
     ConnectAccept(ConnectAccept),
+    SessionConfig(SessionConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -74,8 +77,30 @@ struct Pong {
 enum PacketType {
     ConnectRequest = 0x01,
     ConnectAccept = 0x02,
+    SessionConfig = 0x04,
     Ping = 0x0B,
     Pong = 0x0C,
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct FeatureSet: u64 {
+        const MOVEMENT = 0b00000001;
+        const RAGDOLL = 0b00000010;
+        const INVENTORY = 0b00000100;
+        const WEAPONS = 0b00001000;
+        const EMOTES = 0b00010000;
+        const ABILITIES = 0b00100000;
+        const CUSTOM_UI = 0b01000000;
+        const VOIP  = 0b10000000;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SessionConfig {
+    version: u8,
+    tick_rate: u16,
+    feature_flags: FeatureSet,
 }
 
 impl PacketPayload {
@@ -84,6 +109,12 @@ impl PacketPayload {
             PacketPayload::None => vec![],
             PacketPayload::Ping(ping) => ping.timestamp.to_le_bytes().to_vec(),
             PacketPayload::Pong(pong) => pong.original_timestamp.to_le_bytes().to_vec(),
+            PacketPayload::SessionConfig(config) => {
+                let mut bytes = vec![config.version];
+                bytes.extend(&config.tick_rate.to_le_bytes());
+                bytes.extend(&config.feature_flags.bits().to_le_bytes());
+                bytes
+            }
             _ => vec![],
         }
     }
@@ -209,6 +240,14 @@ impl NeonHost {
         };
 
         self.socket.send_packet(&accept_packet, from)?;
+        
+        let session_config = SessionConfig {
+            version: 1,
+            tick_rate: 60,
+            feature_flags: FeatureSet::MOVEMENT | FeatureSet::RAGDOLL | FeatureSet::INVENTORY,
+        };
+        
+        self.send_config(from, session_config)?;
         println!("Accepted client {} from {}", client_id, from);
         Ok(())
     }
@@ -232,6 +271,17 @@ impl NeonHost {
             }),
         };
         self.socket.send_packet(&pong_packet, from)
+    }
+
+    fn send_config(&self, addr: SocketAddr, config: SessionConfig) -> Result<(), Error> {
+        let config_packet = NeonPacket {
+            packet_type: PacketType::SessionConfig as u8,
+            sequence: 0,
+            client_id: 0,
+            payload: PacketPayload::SessionConfig(config),
+        };
+
+        self.socket.send_packet(&config_packet, addr)
     }
 }
 

@@ -5,6 +5,8 @@ use std::convert::TryInto;
 use std::time::{Instant, Duration};
 use std::thread::sleep;
 
+use bitflags::bitflags;
+
 #[derive(Debug, Clone)]
 struct PacketHeader {
     magic: u16,
@@ -21,6 +23,7 @@ enum PacketPayload {
     Pong(Pong),
     ConnectRequest(ConnectRequest),
     ConnectAccept(ConnectAccept),
+    SessionConfig(SessionConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -65,11 +68,33 @@ struct NeonClient {
     name: String,
 }
 
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct FeatureSet: u64 {
+        const MOVEMENT = 0b00000001;
+        const RAGDOLL = 0b00000010;
+        const INVENTORY = 0b00000100;
+        const WEAPONS = 0b00001000;
+        const EMOTES = 0b00010000;
+        const ABILITIES = 0b00100000;
+        const CUSTOM_UI = 0b01000000;
+        const VOIP  = 0b10000000;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SessionConfig {
+    version: u8,
+    tick_rate: u16,
+    feature_flags: FeatureSet,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 enum PacketType {
     ConnectRequest = 0x01,
     ConnectAccept = 0x02,
+    SessionConfig = 0x04,
     Ping = 0x0B,
     Pong = 0x0C,
 }
@@ -80,6 +105,12 @@ impl PacketPayload {
             PacketPayload::None => vec![],
             PacketPayload::Ping(ping) => ping.timestamp.to_le_bytes().to_vec(),
             PacketPayload::Pong(pong) => pong.original_timestamp.to_le_bytes().to_vec(),
+            PacketPayload::SessionConfig(config) => {
+                let mut bytes = vec![config.version];
+                bytes.extend(&config.tick_rate.to_le_bytes());
+                bytes.extend(&config.feature_flags.bits().to_le_bytes());
+                bytes
+            }
             _ => vec![],
         }
     }
@@ -99,6 +130,19 @@ impl PacketPayload {
                 }
                 let timestamp = u64::from_le_bytes(data[0..8].try_into().unwrap());
                 Ok(PacketPayload::Pong(Pong { original_timestamp: timestamp }))
+            }
+            x if x == PacketType::SessionConfig as u8 => {
+                if data.len() < 11 {
+                    return Err(Error::new(ErrorKind::InvalidData, "SessionConfig too short"));
+                }
+                let version = data[0];
+                let tick_rate = u16::from_le_bytes([data[1], data[2]]);
+                let feature_flags = FeatureSet::from_bits_truncate(u64::from_le_bytes(data[3..11].try_into().unwrap()));
+                Ok(PacketPayload::SessionConfig(SessionConfig {
+                    version,
+                    tick_rate,
+                    feature_flags,
+                }))
             }
             _ => Ok(PacketPayload::None),
         }
@@ -253,6 +297,37 @@ impl PacketHeader {
     }
 }
 
+fn config_session(config: &SessionConfig) -> Vec<String> {
+    let mut enabled_features = Vec::new();
+
+    if config.feature_flags.contains(FeatureSet::MOVEMENT) {
+        enabled_features.push("Movement".to_string());
+    }
+    if config.feature_flags.contains(FeatureSet::RAGDOLL) {
+        enabled_features.push("Ragdoll".to_string());
+    }
+    if config.feature_flags.contains(FeatureSet::INVENTORY) {
+        enabled_features.push("Inventory".to_string());
+    }
+    if config.feature_flags.contains(FeatureSet::WEAPONS) {
+        enabled_features.push("Weapons".to_string());
+    }
+    if config.feature_flags.contains(FeatureSet::EMOTES) {
+        enabled_features.push("Emotes".to_string());
+    }
+    if config.feature_flags.contains(FeatureSet::ABILITIES) {
+        enabled_features.push("Abilities".to_string());
+    }
+    if config.feature_flags.contains(FeatureSet::CUSTOM_UI) {
+        enabled_features.push("Custom UI".to_string());
+    }
+    if config.feature_flags.contains(FeatureSet::VOIP) {
+        enabled_features.push("VOIP".to_string());
+    }
+
+    enabled_features
+}
+
 fn main() {
     println!("Project Neon Alpha Build 2 - Client");
     println!("Starting client...");
@@ -275,6 +350,13 @@ fn main() {
                     x if x == PacketType::Pong as u8 => {
                         if let PacketPayload::Pong(pong) = packet.payload {
                             println!("Received pong with timestamp: {}", pong.original_timestamp);
+                        }
+                    }
+                    x if x == PacketType::SessionConfig as u8 => {
+                        if let PacketPayload::SessionConfig(config) = packet.payload {
+                            println!("Received session config: {:?}", config);
+                            let enabled_features = config_session(&config);
+                            println!("Enabled features: {:?}", enabled_features);
                         }
                     }
                     _ => println!("Received unexpected packet: {:?}", packet),
