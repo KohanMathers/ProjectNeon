@@ -1,9 +1,9 @@
-use std::net::{UdpSocket, SocketAddr};
-use std::io::{Error, ErrorKind, stdin, stdout, Write};
-use std::time::{SystemTime, Instant, Duration};
-use std::convert::TryInto;
+use std::collections::HashMap;
+use std::net::{SocketAddr, UdpSocket};
+use std::time::Duration;
 use std::thread::sleep;
-
+use std::io::{Error, ErrorKind};
+use std::convert::TryInto;
 use bitflags::bitflags;
 
 #[derive(Debug, Clone)]
@@ -243,215 +243,130 @@ impl NeonSocket {
     }
 }
 
-struct NeonClient {
+pub struct HostSession {
     socket: NeonSocket,
-    relay_addr: Option<SocketAddr>,
-    client_id: Option<u8>,
-    session_id: Option<u32>,
-    name: String,
+    relay_addr: SocketAddr,
+    client_id: u8,
+    session_id: u32,
+    connected_clients: HashMap<u8, SocketAddr>,
+    next_client_id: u8,
 }
 
-impl NeonClient {
-    fn new(name: String) -> Result<Self, Error> {
+impl HostSession {
+    pub fn new(relay_addr: SocketAddr) -> Result<Self, Error> {
         Ok(Self {
             socket: NeonSocket::new("0.0.0.0:0")?,
-            relay_addr: None,
-            client_id: None,
-            session_id: None,
-            name,
+            relay_addr,
+            client_id: 1,
+            session_id: rand::random::<u32>(),
+            connected_clients: HashMap::new(),
+            next_client_id: 2,
         })
     }
 
-    fn connect_to_session(&mut self, relay_addr: SocketAddr, target_session_id: u32) -> Result<(), Error> {
-        self.relay_addr = Some(relay_addr);
-        self.socket.socket.set_nonblocking(false)?;
+    pub fn start(&mut self) -> Result<(), Error> {
+        println!("[Host] Starting session {} via relay {}", self.session_id, self.relay_addr);
 
-        let connect_packet = NeonPacket {
-            packet_type: PacketType::ConnectRequest as u8,
-            sequence: 1,
-            client_id: 0,
-            payload: PacketPayload::ConnectRequest(ConnectRequest {
-                client_version: 1,
-                desired_name: self.name.clone(),
-                target_session_id,
+        let host_register_packet = NeonPacket {
+            packet_type: PacketType::ConnectAccept as u8,
+            sequence: 0,
+            client_id: self.client_id,
+            payload: PacketPayload::ConnectAccept(ConnectAccept {
+                assigned_client_id: self.client_id,
+                session_id: self.session_id,
             }),
         };
+        
+        self.socket.send_packet(&host_register_packet, self.relay_addr)?;
 
-        println!("Attempting to connect to session {} via relay...", target_session_id);
-        self.socket.send_packet(&connect_packet, relay_addr)?;
-
-        self.socket.socket.set_read_timeout(Some(Duration::from_secs(10)))?;
-
-        let (response, _) = self.socket.receive_packet()?;
-        self.socket.socket.set_nonblocking(true)?;
-        self.socket.socket.set_read_timeout(None)?;
-
-        if let PacketPayload::ConnectAccept(accept) = response.payload {
-            let client_id = accept.assigned_client_id;
-            let session_id = accept.session_id;
-            
-            if session_id != target_session_id {
-                return Err(Error::new(ErrorKind::ConnectionRefused, 
-                    format!("Session ID mismatch: requested {}, got {}", target_session_id, session_id)));
-            }
-            
-            self.client_id = Some(client_id);
-            self.session_id = Some(session_id);
-
-            let register_packet = NeonPacket {
-                packet_type: PacketType::ConnectAccept as u8,
-                sequence: 2,
-                client_id,
-                payload: PacketPayload::ConnectAccept(accept),
-            };
-            self.socket.send_packet(&register_packet, relay_addr)?;
-
-            println!("Successfully connected to session {}! Assigned client ID: {}", session_id, client_id);
-            Ok(())
-        } else {
-            Err(Error::new(ErrorKind::ConnectionAborted, "Invalid ConnectAccept response"))
-        }
-    }
-
-    fn send_ping(&self) -> Result<(), Error> {
-        if let (Some(relay_addr), Some(client_id)) = (self.relay_addr, self.client_id) {
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-
-            let packet = NeonPacket {
-                packet_type: PacketType::Ping as u8,
-                sequence: 10,
-                client_id,
-                payload: PacketPayload::Ping(Ping { timestamp }),
-            };
-
-            println!("Sending ping @ {}", timestamp);
-            self.socket.send_packet(&packet, relay_addr)
-        } else {
-            Err(Error::new(ErrorKind::NotConnected, "Client not initialized"))
-        }
-    }
-
-    fn process_incoming_packets(&mut self) -> Result<(), Error> {
         loop {
             match self.socket.receive_packet() {
-                Ok((packet, _)) => {
+                Ok((packet, addr)) => {
                     match packet.payload {
-                        PacketPayload::Pong(pong) => {
-                            let pong_time = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
-                            println!("Got pong! Response time: {} ms", (pong_time - pong.original_timestamp));
+                        PacketPayload::ConnectRequest(req) => {
+                            self.handle_connect_request(req, addr)?;
                         }
-                        PacketPayload::SessionConfig(config) => {
-                            println!("Session config: {:?}", config);
+                        PacketPayload::Ping(ping) => {
+                            let pong_packet = NeonPacket {
+                                packet_type: PacketType::Pong as u8,
+                                sequence: packet.sequence,
+                                client_id: self.client_id,
+                                payload: PacketPayload::Pong(Pong {
+                                    original_timestamp: ping.timestamp,
+                                }),
+                            };
+                            self.socket.send_packet(&pong_packet, self.relay_addr)?;
+                            println!("[Host] Responded to ping from client {}", packet.client_id);
                         }
                         _ => {
-                            println!("Unhandled packet: {:?}", packet);
+                            println!("[Host] Unhandled packet from {}: {:?}", addr, packet);
                         }
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    break;
+                    sleep(Duration::from_millis(10));
                 }
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    fn handle_connect_request(&mut self, req: ConnectRequest, _client_addr: SocketAddr) -> Result<(), Error> {
+        if req.target_session_id != self.session_id {
+            println!("[Host] Client '{}' requested wrong session {} (we are {}), ignoring", 
+                    req.desired_name, req.target_session_id, self.session_id);
+            return Ok(());
+        }
+
+        let assigned_id = self.next_client_id;
+        self.next_client_id += 1;
+
+        println!("[Host] New client '{}' requesting to join session {} -> assigned ID {}", 
+                req.desired_name, req.target_session_id, assigned_id);
+
+        let accept = ConnectAccept {
+            assigned_client_id: assigned_id,
+            session_id: self.session_id,
+        };
+
+        let accept_packet = NeonPacket {
+            packet_type: PacketType::ConnectAccept as u8,
+            sequence: 1,
+            client_id: assigned_id,
+            payload: PacketPayload::ConnectAccept(accept.clone()),
+        };
+
+        self.socket.send_packet(&accept_packet, self.relay_addr)?;
+        println!("[Host] Sent ConnectAccept to relay for client {}", assigned_id);
+
+        let config = SessionConfig {
+            version: 1,
+            tick_rate: 60,
+            feature_flags: FeatureSet::MOVEMENT | FeatureSet::INVENTORY,
+        };
+
+        let config_packet = NeonPacket {
+            packet_type: PacketType::SessionConfig as u8,
+            sequence: 2,
+            client_id: assigned_id,
+            payload: PacketPayload::SessionConfig(config),
+        };
+
+        self.socket.send_packet(&config_packet, self.relay_addr)?;
+        println!("[Host] Sent SessionConfig to relay for client {}", assigned_id);
+
+        println!("[Host] Client {} accepted and configured", assigned_id);
         Ok(())
     }
 }
 
-fn get_user_input(prompt: &str) -> String {
-    print!("{}", prompt);
-    stdout().flush().unwrap();
-    let mut input = String::new();
-    stdin().read_line(&mut input).unwrap();
-    input.trim().to_string()
-}
-
 fn main() {
-    println!("Project Neon Alpha Build 12 - Client");
-    println!("==============================================");
+    println!("Project Neon Alpha Build 12 - Host");
+    let relay_addr = "127.0.0.1:7777".parse().unwrap();
+    let mut host = HostSession::new(relay_addr).unwrap();
     
-    let client_name = get_user_input("Enter your client name: ");
-    if client_name.is_empty() {
-        println!("Client name cannot be empty!");
-        return;
-    }
-    
-    let session_input = get_user_input("Enter session ID to connect to: ");
-    let target_session_id: u32 = match session_input.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            println!("Invalid session ID! Please enter a valid number.");
-            return;
-        }
-    };
-    
-    let relay_input = get_user_input("Enter relay address (default: 127.0.0.1:7777): ");
-    let relay_addr_str = if relay_input.is_empty() {
-        "127.0.0.1:7777"
-    } else {
-        &relay_input
-    };
-    
-    let relay_addr: SocketAddr = match relay_addr_str.parse() {
-        Ok(addr) => addr,
-        Err(_) => {
-            println!("Invalid relay address format!");
-            return;
-        }
-    };
-
-    println!("\nAttempting connection...");
-    println!("Client Name: {}", client_name);
-    println!("Target Session ID: {}", target_session_id);
-    println!("Relay Address: {}", relay_addr);
+    println!("Host will create session ID: {}", host.session_id);
     println!();
-
-    let mut client = match NeonClient::new(client_name) {
-        Ok(client) => client,
-        Err(e) => {
-            println!("Failed to create client: {}", e);
-            return;
-        }
-    };
-
-    match client.connect_to_session(relay_addr, target_session_id) {
-        Ok(()) => {
-            println!("Connection successful! Starting ping loop...");
-            println!("Press Ctrl+C to disconnect.\n");
-        }
-        Err(e) => {
-            println!("Failed to connect to session: {}", e);
-            println!("Make sure:");
-            println!("1. The relay server is running");
-            println!("2. A host is running with the specified session ID");
-            println!("3. The session ID is correct");
-            return;
-        }
-    }
-
-    let ping_interval = Duration::from_secs(5);
-    let mut last_ping = Instant::now() - ping_interval;
-
-    loop {
-        if last_ping.elapsed() >= ping_interval {
-            if let Err(e) = client.send_ping() {
-                println!("Failed to send ping: {}", e);
-                break;
-            }
-            last_ping = Instant::now();
-        }
-
-        if let Err(e) = client.process_incoming_packets() {
-            println!("Error processing packets: {}", e);
-            break;
-        }
-
-        sleep(Duration::from_millis(10));
-    }
+    
+    host.start().expect("Host failed");
 }
