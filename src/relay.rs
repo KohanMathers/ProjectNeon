@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind};
 use std::net::{SocketAddr, UdpSocket};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 struct PacketHeader {
@@ -262,6 +263,7 @@ struct PeerInfo {
     addr: SocketAddr,
     client_id: u8,
     session_id: u32,
+    last_seen: Instant,
     is_host: bool,
 }
 
@@ -287,6 +289,47 @@ impl RelayNode {
             hosts: HashMap::new(),
             pending_connections: HashMap::new(),
         })
+    }
+
+    fn cleanup_dead_connections(&mut self) {
+        let timeout = Duration::from_secs(15);
+        let now = Instant::now();
+
+        let mut sessions_to_remove: Vec<u32> = Vec::new();
+
+        for (session_id, peers) in &mut self.sessions {
+            peers.retain(|peer| {
+                let is_alive = now.duration_since(peer.last_seen) < timeout;
+                if !is_alive {
+                    println!(
+                        "[Relay] Client {} in session {} timed out",
+                        peer.client_id, session_id
+                    );
+                }
+                is_alive
+            });
+
+            if peers.is_empty() {
+                sessions_to_remove.push(*session_id);
+            }
+        }
+
+        for session_id in sessions_to_remove {
+            self.sessions.remove(&session_id);
+            self.hosts.remove(&session_id);
+            println!("[Relay] Removed empty session {}", session_id)
+        }
+    }
+
+    fn update_client_activity(&mut self, client_id: u8, session_id: u32) {
+        if let Some(peers) = self.sessions.get_mut(&session_id) {
+            for peer in peers.iter_mut() {
+                if peer.client_id == client_id {
+                    peer.last_seen = Instant::now();
+                    break;
+                }
+            }
+        }
     }
 
     fn run(&mut self) -> Result<(), Error> {
