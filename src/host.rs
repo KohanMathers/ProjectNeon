@@ -82,9 +82,11 @@ struct SessionConfig {
 enum PacketType {
     ConnectRequest = 0x01,
     ConnectAccept = 0x02,
+    ConnectDeny = 0x03,
     SessionConfig = 0x04,
     Ping = 0x0B,
     Pong = 0x0C,
+    DisconnectNotice = 0x0D,
 }
 
 impl PacketPayload {
