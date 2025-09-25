@@ -3,6 +3,7 @@ use std::convert::TryInto;
 use std::io::{Error, ErrorKind};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
+use std::thread::sleep;
 
 #[derive(Debug, Clone)]
 struct PacketHeader {
@@ -301,14 +302,18 @@ impl RelayNode {
 
         for (session_id, peers) in &mut self.sessions {
             peers.retain(|peer| {
-                let is_alive = now.duration_since(peer.last_seen) < timeout;
-                if !is_alive {
-                    println!(
-                        "[Relay] Client {} in session {} timed out",
-                        peer.client_id, session_id
-                    );
+                if !peer.is_host {
+                    let is_alive = now.duration_since(peer.last_seen) < timeout;
+                    if !is_alive {
+                        println!(
+                            "[Relay] Client {} in session {} timed out",
+                            peer.client_id, session_id
+                        );
+                    }
+                    is_alive
+                } else {
+                    true
                 }
-                is_alive
             });
 
             if peers.is_empty() {
@@ -334,39 +339,69 @@ impl RelayNode {
         }
     }
 
+    fn find_session_for_addr(&self, addr: SocketAddr) -> Option<u32> {
+        for (session_id, peers) in &self.sessions {
+            if peers.iter().any(|p| p.addr == addr) {
+                return Some(*session_id);
+            }
+        }
+        None
+    }
+
     fn run(&mut self) -> Result<(), Error> {
         println!("Relay node listening on {}...", "0.0.0.0:7777");
         println!();
+        
+        self.socket.socket.set_nonblocking(true)?;
+        
+        let mut last_cleanup = Instant::now();
+        let cleanup_interval = Duration::from_secs(5);
 
         loop {
-            let (packet, addr) = self.socket.receive_packet()?;
-
-            match packet.packet_type {
-                x if x == PacketType::ConnectRequest as u8 => {
-                    if let PacketPayload::ConnectRequest(req) = packet.payload {
-                        self.handle_connect_request(req, addr)?;
-                    }
-                }
-                x if x == PacketType::ConnectAccept as u8 => {
-                    if let PacketPayload::ConnectAccept(accept) = packet.payload.clone() {
-                        if let Some(host_addr) = self.hosts.get(&accept.session_id) {
-                            if addr == *host_addr && packet.client_id != 1 {
-                                self.route_connect_accept_to_client(accept, packet.client_id)?;
-                                continue;
+            match self.socket.receive_packet() {
+                Ok((packet, addr)) => {
+                    match packet.packet_type {
+                        x if x == PacketType::ConnectRequest as u8 => {
+                            if let PacketPayload::ConnectRequest(req) = packet.payload {
+                                self.handle_connect_request(req, addr)?;
                             }
                         }
+                        x if x == PacketType::ConnectAccept as u8 => {
+                            if let PacketPayload::ConnectAccept(accept) = packet.payload.clone() {
+                                if let Some(host_addr) = self.hosts.get(&accept.session_id) {
+                                    if addr == *host_addr && packet.client_id != 1 {
+                                        self.route_connect_accept_to_client(accept, packet.client_id)?;
+                                        continue;
+                                    }
+                                }
 
-                        if packet.client_id == 1 {
-                            self.register_host(accept.session_id, addr);
-                        } else {
-                            self.register_client(accept.session_id, packet.client_id, addr);
+                                if packet.client_id == 1 {
+                                    self.register_host(accept.session_id, addr);
+                                } else {
+                                    self.register_client(accept.session_id, packet.client_id, addr);
+                                }
+                            }
+                        }
+                        _ => {
+                            self.forward_to_peers(&packet, addr)?;
+                            if let Some(session_id) = self.find_session_for_addr(addr) {
+                                self.update_client_activity(packet.client_id, session_id);
+                            }
                         }
                     }
                 }
-                _ => {
-                    self.forward_to_peers(&packet, addr)?;
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    // No packets available, continue to cleanup check
                 }
+                Err(e) => return Err(e),
             }
+
+            if last_cleanup.elapsed() >= cleanup_interval {
+                self.cleanup_dead_connections();
+                last_cleanup = Instant::now();
+            }
+
+            sleep(Duration::from_millis(1));
         }
     }
 
@@ -460,6 +495,7 @@ impl RelayNode {
             client_id: 1,
             session_id,
             is_host: true,
+            last_seen: Instant::now(),
         };
 
         self.sessions
@@ -481,6 +517,7 @@ impl RelayNode {
             client_id,
             session_id,
             is_host: false,
+            last_seen: Instant::now(),
         };
 
         self.sessions
