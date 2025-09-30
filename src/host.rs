@@ -5,6 +5,7 @@ use std::io::{Error, ErrorKind};
 use std::net::{SocketAddr, UdpSocket};
 use std::thread::sleep;
 use std::time::Duration;
+use std::env;
 
 #[derive(Debug, Clone)]
 struct PacketHeader {
@@ -13,6 +14,7 @@ struct PacketHeader {
     packet_type: u8,
     sequence: u16,
     client_id: u8,
+    destination_id: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +32,7 @@ struct NeonPacket {
     packet_type: u8,
     sequence: u16,
     client_id: u8,
+    destination_id: u8,
     payload: PacketPayload,
 }
 
@@ -141,7 +144,7 @@ impl PacketPayload {
                     ));
                 }
                 let client_version = data[0];
-                let target_session_id = u32::from_le_bytes(data[1..5].try_into().unwrap());
+                let target_session_id = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
                 let desired_name = String::from_utf8_lossy(&data[5..]).to_string();
                 Ok(PacketPayload::ConnectRequest(ConnectRequest {
                     client_version,
@@ -194,11 +197,12 @@ impl PacketHeader {
         bytes.push(self.packet_type);
         bytes.extend(&self.sequence.to_le_bytes());
         bytes.push(self.client_id);
+        bytes.push(self.destination_id);
         bytes
     }
 
     fn from_bytes(data: &[u8]) -> Result<PacketHeader, Error> {
-        if data.len() < 7 {
+        if data.len() < 8 {
             return Err(Error::new(ErrorKind::InvalidData, "Data too short"));
         }
 
@@ -213,6 +217,7 @@ impl PacketHeader {
             packet_type: data[3],
             sequence: u16::from_le_bytes([data[4], data[5]]),
             client_id: data[6],
+            destination_id: data[7],
         })
     }
 }
@@ -235,6 +240,7 @@ impl NeonSocket {
             packet_type: packet.packet_type,
             sequence: packet.sequence,
             client_id: packet.client_id,
+            destination_id: packet.destination_id,
         };
         let mut bytes = header.to_bytes();
         bytes.extend(packet.payload.to_bytes());
@@ -245,13 +251,14 @@ impl NeonSocket {
     fn receive_packet(&self) -> Result<(NeonPacket, SocketAddr), Error> {
         let mut buf = [0; 1024];
         let (size, addr) = self.socket.recv_from(&mut buf)?;
-        let header = PacketHeader::from_bytes(&buf[..7])?;
-        let payload = PacketPayload::from_bytes(header.packet_type, &buf[7..size])?;
+        let header = PacketHeader::from_bytes(&buf[..8])?;
+        let payload = PacketPayload::from_bytes(header.packet_type, &buf[8..size])?;
         Ok((
             NeonPacket {
                 packet_type: header.packet_type,
                 sequence: header.sequence,
                 client_id: header.client_id,
+                destination_id: header.destination_id,
                 payload,
             },
             addr,
@@ -269,12 +276,12 @@ pub struct HostSession {
 }
 
 impl HostSession {
-    pub fn new(relay_addr: SocketAddr) -> Result<Self, Error> {
+    pub fn new(relay_addr: SocketAddr, session_id: u32) -> Result<Self, Error> {
         Ok(Self {
             socket: NeonSocket::new("0.0.0.0:0")?,
             relay_addr,
             client_id: 1,
-            session_id: rand::random::<u32>(),
+            session_id,
             connected_clients: HashMap::new(),
             next_client_id: 2,
         })
@@ -290,6 +297,7 @@ impl HostSession {
             packet_type: PacketType::ConnectAccept as u8,
             sequence: 0,
             client_id: self.client_id,
+            destination_id: 1, // always to relay/host
             payload: PacketPayload::ConnectAccept(ConnectAccept {
                 assigned_client_id: self.client_id,
                 session_id: self.session_id,
@@ -310,6 +318,7 @@ impl HostSession {
                             packet_type: PacketType::Pong as u8,
                             sequence: packet.sequence,
                             client_id: self.client_id,
+                            destination_id: packet.client_id, // reply to the client
                             payload: PacketPayload::Pong(Pong {
                                 original_timestamp: ping.timestamp,
                             }),
@@ -359,6 +368,7 @@ impl HostSession {
             packet_type: PacketType::ConnectAccept as u8,
             sequence: 1,
             client_id: assigned_id,
+            destination_id: assigned_id, // send to the new client
             payload: PacketPayload::ConnectAccept(accept.clone()),
         };
 
@@ -378,6 +388,7 @@ impl HostSession {
             packet_type: PacketType::SessionConfig as u8,
             sequence: 2,
             client_id: assigned_id,
+            destination_id: assigned_id, // send to the new client
             payload: PacketPayload::SessionConfig(config),
         };
 
@@ -395,7 +406,21 @@ impl HostSession {
 fn main() {
     println!("Project Neon Alpha Build 12 - Host");
     let relay_addr = "127.0.0.1:7777".parse().unwrap();
-    let mut host = HostSession::new(relay_addr).unwrap();
+
+    let args: Vec<String> = env::args().collect();
+    let session_id = if args.len() > 1 {
+        match args[1].parse::<u32>() {
+            Ok(id) => id,
+            Err(_) => {
+                println!("Invalid session ID argument, using random session ID.");
+                rand::random::<u32>()
+            }
+        }
+    } else {
+        rand::random::<u32>()
+    };
+
+    let mut host = HostSession::new(relay_addr, session_id).unwrap();
 
     println!("Host will create session ID: {}", host.session_id);
     println!();

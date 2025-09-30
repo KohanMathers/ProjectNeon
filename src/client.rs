@@ -13,6 +13,7 @@ struct PacketHeader {
     packet_type: u8,
     sequence: u16,
     client_id: u8,
+    destination_id: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,7 @@ struct NeonPacket {
     packet_type: u8,
     sequence: u16,
     client_id: u8,
+    destination_id: u8,
     payload: PacketPayload,
 }
 
@@ -183,6 +185,7 @@ impl PacketHeader {
         bytes.push(self.packet_type);
         bytes.extend(&self.sequence.to_le_bytes());
         bytes.push(self.client_id);
+        bytes.push(self.destination_id);
         bytes
     }
 
@@ -202,6 +205,7 @@ impl PacketHeader {
             packet_type: data[3],
             sequence: u16::from_le_bytes([data[4], data[5]]),
             client_id: data[6],
+            destination_id: data[7],
         })
     }
 }
@@ -224,6 +228,7 @@ impl NeonSocket {
             packet_type: packet.packet_type,
             sequence: packet.sequence,
             client_id: packet.client_id,
+            destination_id: packet.destination_id,
         };
         let mut bytes = header.to_bytes();
         bytes.extend(packet.payload.to_bytes());
@@ -234,12 +239,13 @@ impl NeonSocket {
     fn receive_packet(&self) -> Result<(NeonPacket, SocketAddr), Error> {
         let mut buf = [0; 1024];
         let (size, addr) = self.socket.recv_from(&mut buf)?;
-        let header = PacketHeader::from_bytes(&buf[..7])?;
-        let payload = PacketPayload::from_bytes(header.packet_type, &buf[7..size])?;
+        let header = PacketHeader::from_bytes(&buf[..8])?;
+        let payload = PacketPayload::from_bytes(header.packet_type, &buf[8..size])?;
         Ok((NeonPacket {
             packet_type: header.packet_type,
             sequence: header.sequence,
             client_id: header.client_id,
+            destination_id: header.destination_id,
             payload,
         }, addr))
     }
@@ -268,16 +274,22 @@ impl NeonClient {
         self.relay_addr = Some(relay_addr);
         self.socket.socket.set_nonblocking(false)?;
 
+        let connect_req = ConnectRequest {
+            client_version: 1,
+            desired_name: self.name.clone(),
+            target_session_id,
+        };
         let connect_packet = NeonPacket {
             packet_type: PacketType::ConnectRequest as u8,
             sequence: 1,
             client_id: 0,
-            payload: PacketPayload::ConnectRequest(ConnectRequest {
-                client_version: 1,
-                desired_name: self.name.clone(),
-                target_session_id,
-            }),
+            destination_id: 1, // always send to host
+            payload: PacketPayload::ConnectRequest(connect_req.clone()),
         };
+
+        // Debug: print raw bytes of ConnectRequest
+        let payload_bytes = PacketPayload::ConnectRequest(connect_req).to_bytes();
+        println!("[DEBUG] ConnectRequest raw bytes: {:?}", payload_bytes);
 
         println!("Attempting to connect to session {} via relay...", target_session_id);
         self.socket.send_packet(&connect_packet, relay_addr)?;
@@ -304,6 +316,7 @@ impl NeonClient {
                 packet_type: PacketType::ConnectAccept as u8,
                 sequence: 2,
                 client_id,
+                destination_id: 1, // always send to host
                 payload: PacketPayload::ConnectAccept(accept),
             };
             self.socket.send_packet(&register_packet, relay_addr)?;
@@ -326,6 +339,7 @@ impl NeonClient {
                 packet_type: PacketType::Ping as u8,
                 sequence: 10,
                 client_id,
+                destination_id: 1, // always send to host
                 payload: PacketPayload::Ping(Ping { timestamp }),
             };
 
@@ -356,8 +370,6 @@ impl NeonClient {
                                     println!("Unhandled packet: {:?}", packet);
                                 }
                         }
-                    } else {
-                        println!("Packet not for me! My ID: {} Packet ID: {}", self.client_id.unwrap(), packet.client_id)
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {

@@ -12,6 +12,7 @@ struct PacketHeader {
     packet_type: u8,
     sequence: u16,
     client_id: u8,
+    destination_id: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +30,7 @@ struct NeonPacket {
     packet_type: u8,
     sequence: u16,
     client_id: u8,
+    destination_id: u8,
     payload: PacketPayload,
 }
 
@@ -95,11 +97,12 @@ impl PacketHeader {
         bytes.push(self.packet_type);
         bytes.extend(&self.sequence.to_le_bytes());
         bytes.push(self.client_id);
+        bytes.push(self.destination_id);
         bytes
     }
 
     fn from_bytes(data: &[u8]) -> Result<PacketHeader, Error> {
-        if data.len() < 7 {
+        if data.len() < 8 {
             return Err(Error::new(ErrorKind::InvalidData, "Data too short"));
         }
 
@@ -112,6 +115,7 @@ impl PacketHeader {
         let packet_type = data[3];
         let sequence = u16::from_le_bytes([data[4], data[5]]);
         let client_id = data[6];
+        let destination_id = data[7];
 
         Ok(PacketHeader {
             magic,
@@ -119,6 +123,7 @@ impl PacketHeader {
             packet_type,
             sequence,
             client_id,
+            destination_id,
         })
     }
 }
@@ -237,6 +242,7 @@ impl NeonSocket {
             packet_type: packet.packet_type,
             sequence: packet.sequence,
             client_id: packet.client_id,
+            destination_id: packet.destination_id,
         };
         let mut bytes = header.to_bytes();
         bytes.extend(packet.payload.to_bytes());
@@ -247,13 +253,14 @@ impl NeonSocket {
     fn receive_packet(&self) -> Result<(NeonPacket, SocketAddr), Error> {
         let mut buf = [0; 1024];
         let (size, addr) = self.socket.recv_from(&mut buf)?;
-        let header = PacketHeader::from_bytes(&buf[..7])?;
-        let payload = PacketPayload::from_bytes(header.packet_type, &buf[7..size])?;
+        let header = PacketHeader::from_bytes(&buf[..8])?;
+        let payload = PacketPayload::from_bytes(header.packet_type, &buf[8..size])?;
         Ok((
             NeonPacket {
                 packet_type: header.packet_type,
                 sequence: header.sequence,
                 client_id: header.client_id,
+                destination_id: header.destination_id,
                 payload,
             },
             addr,
@@ -416,6 +423,11 @@ impl RelayNode {
             "[Relay] Client '{}' from {} requesting to join session {}",
             req.desired_name, client_addr, target_session
         );
+        // Debug: print raw bytes of ConnectRequest as received
+        let mut debug_bytes = vec![req.client_version];
+        debug_bytes.extend(&req.target_session_id.to_le_bytes());
+        debug_bytes.extend(req.desired_name.as_bytes());
+        println!("[DEBUG] Received ConnectRequest raw bytes: {:?}", debug_bytes);
 
         if let Some(host_addr) = self.hosts.get(&target_session) {
             println!(
@@ -436,8 +448,12 @@ impl RelayNode {
                 packet_type: PacketType::ConnectRequest as u8,
                 sequence: 1,
                 client_id: 0,
-                payload: PacketPayload::ConnectRequest(req),
+                destination_id: 1, // always to host
+                payload: PacketPayload::ConnectRequest(req.clone()),
             };
+            // Debug: print raw bytes of ConnectRequest as forwarded
+            let payload_bytes = PacketPayload::ConnectRequest(req).to_bytes();
+            println!("[DEBUG] Forwarded ConnectRequest raw bytes: {:?}", payload_bytes);
 
             self.socket.send_packet(&forward_packet, *host_addr)?;
         } else {
@@ -474,6 +490,7 @@ impl RelayNode {
                 packet_type: PacketType::ConnectAccept as u8,
                 sequence: 1,
                 client_id,
+                destination_id: client_id, // to the client
                 payload: PacketPayload::ConnectAccept(accept),
             };
 
