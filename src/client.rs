@@ -25,6 +25,8 @@ enum PacketPayload {
     ConnectAccept(ConnectAccept),
     ConnectDeny(ConnectDeny),
     SessionConfig(SessionConfig),
+    PacketTypeRegistry(PacketTypeRegistry),
+    GamePacket(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -41,12 +43,25 @@ struct ConnectRequest {
     client_version: u8,
     desired_name: String,
     target_session_id: u32,
+    game_identifier: u32,
 }
 
 #[derive(Debug, Clone)]
 struct ConnectAccept {
     assigned_client_id: u8,
     session_id: u32,
+}
+
+#[derive(Debug, Clone)]
+struct PacketTypeRegistry {
+    entries: Vec<PacketTypeEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct PacketTypeEntry {
+    packet_id: u8,
+    name: String,
+    description: String,
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +97,7 @@ bitflags! {
 struct SessionConfig {
     version: u8,
     tick_rate: u16,
-    feature_flags: FeatureSet,
+    max_packet_size: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,9 +107,11 @@ enum PacketType {
     ConnectAccept = 0x02,
     ConnectDeny = 0x03,
     SessionConfig = 0x04,
+    PacketTypeRegistry = 0x05,
     Ping = 0x0B,
     Pong = 0x0C,
     DisconnectNotice = 0x0D,
+    GamePacket = 0x10, // 0x10+ application-defined
 }
 
 impl PacketPayload {
@@ -106,6 +123,7 @@ impl PacketPayload {
             PacketPayload::ConnectRequest(req) => {
                 let mut bytes = vec![req.client_version];
                 bytes.extend(&req.target_session_id.to_le_bytes());
+                bytes.extend(&req.game_identifier.to_le_bytes());
                 bytes.extend(req.desired_name.as_bytes());
                 bytes
             }
@@ -120,14 +138,29 @@ impl PacketPayload {
             PacketPayload::SessionConfig(config) => {
                 let mut bytes = vec![config.version];
                 bytes.extend(&config.tick_rate.to_le_bytes());
-                bytes.extend(&config.feature_flags.bits().to_le_bytes());
+                bytes.extend(&config.max_packet_size.to_le_bytes());
                 bytes
             }
+            PacketPayload::PacketTypeRegistry(registry) => {
+                let mut bytes = Vec::new();
+                bytes.push(registry.entries.len() as u8);
+                for entry in &registry.entries {
+                    bytes.push(entry.packet_id);
+                    let name_bytes = entry.name.as_bytes();
+                    let desc_bytes = entry.description.as_bytes();
+                    bytes.push(name_bytes.len() as u8);
+                    bytes.extend(name_bytes);
+                    bytes.push(desc_bytes.len() as u8);
+                    bytes.extend(desc_bytes);
+                }
+                bytes
+            }
+            PacketPayload::GamePacket(data) => data.clone(),
         }
     }
 
     fn from_bytes(packet_type: u8, data: &[u8]) -> Result<Self, Error> {
-        match packet_type {
+    match packet_type {
             x if x == PacketType::Ping as u8 => {
                 if data.len() < 8 {
                     return Err(Error::new(ErrorKind::InvalidData, "Ping too short"));
@@ -145,16 +178,18 @@ impl PacketPayload {
                 }))
             }
             x if x == PacketType::ConnectRequest as u8 => {
-                if data.len() < 5 {
+                if data.len() < 9 {
                     return Err(Error::new(ErrorKind::InvalidData, "ConnectRequest too short"));
                 }
                 let client_version = data[0];
-                let target_session_id = u32::from_le_bytes(data[1..5].try_into().unwrap());
-                let desired_name = String::from_utf8_lossy(&data[5..]).to_string();
+                let target_session_id = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+                let game_identifier = u32::from_le_bytes([data[5], data[6], data[7], data[8]]);
+                let desired_name = String::from_utf8_lossy(&data[9..]).to_string();
                 Ok(PacketPayload::ConnectRequest(ConnectRequest {
                     client_version,
                     desired_name,
                     target_session_id,
+                    game_identifier,
                 }))
             }
             x if x == PacketType::ConnectAccept as u8 => {
@@ -173,17 +208,39 @@ impl PacketPayload {
                 Ok(PacketPayload::ConnectDeny(ConnectDeny { reason }))
             }
             x if x == PacketType::SessionConfig as u8 => {
-                if data.len() < 11 {
+                if data.len() < 5 {
                     return Err(Error::new(ErrorKind::InvalidData, "SessionConfig too short"));
                 }
                 let version = data[0];
                 let tick_rate = u16::from_le_bytes([data[1], data[2]]);
-                let feature_flags = FeatureSet::from_bits_truncate(u64::from_le_bytes(data[3..11].try_into().unwrap()));
+                let max_packet_size = u16::from_le_bytes([data[3], data[4]]);
                 Ok(PacketPayload::SessionConfig(SessionConfig {
                     version,
                     tick_rate,
-                    feature_flags,
+                    max_packet_size,
                 }))
+            }
+            x if x == PacketType::PacketTypeRegistry as u8 => {
+                if data.is_empty() {
+                    return Ok(PacketPayload::PacketTypeRegistry(PacketTypeRegistry { entries: vec![] }));
+                }
+                let mut idx = 0;
+                let mut entries = Vec::new();
+                let count = data[idx] as usize;
+                idx += 1;
+                for _ in 0..count {
+                    if idx >= data.len() { break; }
+                    let packet_id = data[idx]; idx += 1;
+                    let name_len = data[idx] as usize; idx += 1;
+                    let name = String::from_utf8_lossy(&data[idx..idx+name_len]).to_string(); idx += name_len;
+                    let desc_len = data[idx] as usize; idx += 1;
+                    let description = String::from_utf8_lossy(&data[idx..idx+desc_len]).to_string(); idx += desc_len;
+                    entries.push(PacketTypeEntry { packet_id, name, description });
+                }
+                Ok(PacketPayload::PacketTypeRegistry(PacketTypeRegistry { entries }))
+            }
+            x if x >= 0x10 => {
+                Ok(PacketPayload::GamePacket(data.to_vec()))
             }
             _ => Ok(PacketPayload::None),
         }
@@ -291,6 +348,7 @@ impl NeonClient {
             client_version: 1,
             desired_name: self.name.clone(),
             target_session_id,
+            game_identifier: 0, // Set your game identifier here
         };
         let connect_packet = NeonPacket {
             packet_type: PacketType::ConnectRequest as u8,
@@ -376,6 +434,12 @@ impl NeonClient {
                                 }
                                 PacketPayload::SessionConfig(config) => {
                                     println!("Session config: {:?}", config);
+                                }
+                                PacketPayload::PacketTypeRegistry(registry) => {
+                                    println!("Received PacketTypeRegistry:");
+                                    for entry in registry.entries {
+                                        println!("  0x{:02X}: {} - {}", entry.packet_id, entry.name, entry.description);
+                                    }
                                 }
                                 _ => {
                                     println!("Unhandled packet: {:?}", packet);

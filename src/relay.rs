@@ -24,6 +24,8 @@ enum PacketPayload {
     ConnectAccept(ConnectAccept),
     ConnectDeny(ConnectDeny),
     SessionConfig(SessionConfig),
+    PacketTypeRegistry(PacketTypeRegistry),
+    GamePacket(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +42,7 @@ struct ConnectRequest {
     client_version: u8,
     desired_name: String,
     target_session_id: u32,
+    game_identifier: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,37 +66,36 @@ struct Pong {
     original_timestamp: u64,
 }
 
+#[derive(Debug, Clone)]
+struct SessionConfig {
+    version: u8,
+    tick_rate: u16,
+    max_packet_size: u16,
+}
+
+#[derive(Debug, Clone)]
+struct PacketTypeRegistry {
+    entries: Vec<PacketTypeEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct PacketTypeEntry {
+    packet_id: u8,
+    name: String,
+    description: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
-enum PacketType {
+enum CorePacketType {
     ConnectRequest = 0x01,
     ConnectAccept = 0x02,
     ConnectDeny = 0x03,
     SessionConfig = 0x04,
+    PacketTypeRegistry = 0x05,
     Ping = 0x0B,
     Pong = 0x0C,
     DisconnectNotice = 0x0D,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SessionConfig {
-    version: u8,
-    tick_rate: u16,
-    feature_flags: FeatureSet,
-}
-
-bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    struct FeatureSet: u64 {
-        const MOVEMENT = 0b00000001;
-        const RAGDOLL = 0b00000010;
-        const INVENTORY = 0b00000100;
-        const WEAPONS = 0b00001000;
-        const EMOTES = 0b00010000;
-        const ABILITIES = 0b00100000;
-        const CUSTOM_UI = 0b01000000;
-        const VOIP  = 0b10000000;
-    }
 }
 
 impl PacketHeader {
@@ -144,6 +146,14 @@ impl PacketPayload {
             PacketPayload::ConnectRequest(req) => {
                 let mut bytes = vec![req.client_version];
                 bytes.extend(&req.target_session_id.to_le_bytes());
+                
+                if let Some(game_id) = req.game_identifier {
+                    bytes.push(1);
+                    bytes.extend(&game_id.to_le_bytes());
+                } else {
+                    bytes.push(0);
+                }
+                
                 bytes.extend(req.desired_name.as_bytes());
                 bytes
             }
@@ -158,22 +168,40 @@ impl PacketPayload {
             PacketPayload::SessionConfig(config) => {
                 let mut bytes = vec![config.version];
                 bytes.extend(&config.tick_rate.to_le_bytes());
-                bytes.extend(&config.feature_flags.bits().to_le_bytes());
+                bytes.extend(&config.max_packet_size.to_le_bytes());
                 bytes
             }
+            PacketPayload::PacketTypeRegistry(registry) => {
+                let mut bytes = Vec::new();
+                bytes.extend(&(registry.entries.len() as u16).to_le_bytes());
+                
+                for entry in &registry.entries {
+                    bytes.push(entry.packet_id);
+                    let name_bytes = entry.name.as_bytes();
+                    bytes.push(name_bytes.len() as u8);
+                    bytes.extend(name_bytes);
+                    
+                    let desc_bytes = entry.description.as_bytes();
+                    bytes.extend(&(desc_bytes.len() as u16).to_le_bytes());
+                    bytes.extend(desc_bytes);
+                }
+                
+                bytes
+            }
+            PacketPayload::GamePacket(data) => data.clone(),
         }
     }
 
     fn from_bytes(packet_type: u8, data: &[u8]) -> Result<Self, Error> {
         match packet_type {
-            x if x == PacketType::Ping as u8 => {
+            x if x == CorePacketType::Ping as u8 => {
                 if data.len() < 8 {
                     return Err(Error::new(ErrorKind::InvalidData, "Ping too short"));
                 }
                 let timestamp = u64::from_le_bytes(data[0..8].try_into().unwrap());
                 Ok(PacketPayload::Ping(Ping { timestamp }))
             }
-            x if x == PacketType::Pong as u8 => {
+            x if x == CorePacketType::Pong as u8 => {
                 if data.len() < 8 {
                     return Err(Error::new(ErrorKind::InvalidData, "Pong too short"));
                 }
@@ -182,8 +210,8 @@ impl PacketPayload {
                     original_timestamp: timestamp,
                 }))
             }
-            x if x == PacketType::ConnectRequest as u8 => {
-                if data.len() < 5 {
+            x if x == CorePacketType::ConnectRequest as u8 => {
+                if data.len() < 6 {
                     return Err(Error::new(
                         ErrorKind::InvalidData,
                         "ConnectRequest too short",
@@ -191,14 +219,29 @@ impl PacketPayload {
                 }
                 let client_version = data[0];
                 let target_session_id = u32::from_le_bytes(data[1..5].try_into().unwrap());
-                let desired_name = String::from_utf8_lossy(&data[5..]).to_string();
+                
+                let has_game_id = data[5];
+                let (game_identifier, name_start) = if has_game_id == 1 {
+                    if data.len() < 10 {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "ConnectRequest with game_id too short",
+                        ));
+                    }
+                    (Some(u32::from_le_bytes(data[6..10].try_into().unwrap())), 10)
+                } else {
+                    (None, 6)
+                };
+                
+                let desired_name = String::from_utf8_lossy(&data[name_start..]).to_string();
                 Ok(PacketPayload::ConnectRequest(ConnectRequest {
                     client_version,
                     desired_name,
                     target_session_id,
+                    game_identifier,
                 }))
             }
-            x if x == PacketType::ConnectAccept as u8 => {
+            x if x == CorePacketType::ConnectAccept as u8 => {
                 if data.len() < 5 {
                     return Err(Error::new(
                         ErrorKind::InvalidData,
@@ -212,12 +255,12 @@ impl PacketPayload {
                     session_id,
                 }))
             }
-            x if x == PacketType::ConnectDeny as u8 => {
+            x if x == CorePacketType::ConnectDeny as u8 => {
                 let reason = String::from_utf8_lossy(data).to_string();
                 Ok(PacketPayload::ConnectDeny(ConnectDeny { reason }))
             }
-            x if x == PacketType::SessionConfig as u8 => {
-                if data.len() < 11 {
+            x if x == CorePacketType::SessionConfig as u8 => {
+                if data.len() < 5 {
                     return Err(Error::new(
                         ErrorKind::InvalidData,
                         "SessionConfig too short",
@@ -225,15 +268,32 @@ impl PacketPayload {
                 }
                 let version = data[0];
                 let tick_rate = u16::from_le_bytes([data[1], data[2]]);
-                let feature_flags = FeatureSet::from_bits_truncate(u64::from_le_bytes(
-                    data[3..11].try_into().unwrap(),
-                ));
+                let max_packet_size = u16::from_le_bytes([data[3], data[4]]);
                 Ok(PacketPayload::SessionConfig(SessionConfig {
                     version,
                     tick_rate,
-                    feature_flags,
+                    max_packet_size,
                 }))
             }
+            x if x == CorePacketType::PacketTypeRegistry as u8 => {
+                if data.is_empty() {
+                    return Ok(PacketPayload::PacketTypeRegistry(PacketTypeRegistry { entries: vec![] }));
+                }
+                let entry_count = data[0] as usize;
+                let mut entries = Vec::new();
+                let mut offset = 1;
+                for _ in 0..entry_count {
+                    if offset >= data.len() { break; }
+                    let packet_id = data[offset]; offset += 1;
+                    let name_len = data[offset] as usize; offset += 1;
+                    let name = String::from_utf8_lossy(&data[offset..offset + name_len]).to_string(); offset += name_len;
+                    let desc_len = data[offset] as usize; offset += 1;
+                    let description = String::from_utf8_lossy(&data[offset..offset + desc_len]).to_string(); offset += desc_len;
+                    entries.push(PacketTypeEntry { packet_id, name, description });
+                }
+                Ok(PacketPayload::PacketTypeRegistry(PacketTypeRegistry { entries }))
+            }
+            x if x >= 0x10 => Ok(PacketPayload::GamePacket(data.to_vec())),
             _ => Ok(PacketPayload::None),
         }
     }
@@ -371,6 +431,7 @@ impl RelayNode {
 
     fn run(&mut self) -> Result<(), Error> {
         println!("Relay node listening on {}...", "0.0.0.0:7777");
+        println!("Protocol Version: 0.2");
         println!();
         
         self.socket.socket.set_nonblocking(true)?;
@@ -381,43 +442,50 @@ impl RelayNode {
         loop {
             match self.socket.receive_packet() {
                 Ok((packet, addr)) => {
-                    match packet.packet_type {
-                        x if x == PacketType::ConnectRequest as u8 => {
-                            if let PacketPayload::ConnectRequest(req) = packet.payload {
-                                self.handle_connect_request(req, addr)?;
+                    if packet.packet_type < 0x10 {
+                        match packet.packet_type {
+                            x if x == CorePacketType::ConnectRequest as u8 => {
+                                if let PacketPayload::ConnectRequest(req) = packet.payload {
+                                    self.handle_connect_request(req, addr)?;
+                                }
                             }
-                        }
-                        x if x == PacketType::ConnectAccept as u8 => {
-                            if let PacketPayload::ConnectAccept(accept) = packet.payload.clone() {
-                                if let Some(host_addr) = self.hosts.get(&accept.session_id) {
-                                    if addr == *host_addr && packet.client_id != 1 {
-                                        self.route_connect_accept_to_client(accept, packet.client_id)?;
-                                        continue;
+                            x if x == CorePacketType::ConnectAccept as u8 => {
+                                if let PacketPayload::ConnectAccept(accept) = packet.payload.clone() {
+                                    if let Some(host_addr) = self.hosts.get(&accept.session_id) {
+                                        if addr == *host_addr && packet.client_id != 1 {
+                                            self.route_connect_accept_to_client(accept, packet.client_id)?;
+                                            continue;
+                                        }
+                                    }
+
+                                    if packet.client_id == 1 {
+                                        self.register_host(accept.session_id, addr);
+                                    } else {
+                                        self.register_client(accept.session_id, packet.client_id, addr);
                                     }
                                 }
-
-                                if packet.client_id == 1 {
-                                    self.register_host(accept.session_id, addr);
-                                } else {
-                                    self.register_client(accept.session_id, packet.client_id, addr);
+                            }
+                            x if x == CorePacketType::ConnectDeny as u8 => {
+                                if let PacketPayload::ConnectDeny(deny) = packet.payload {
+                                    self.handle_connect_deny(deny, addr)?;
+                                }
+                            }
+                            _ => {
+                                self.forward_to_peers(&packet, addr)?;
+                                if let Some(session_id) = self.find_session_for_addr(addr) {
+                                    self.update_client_activity(packet.client_id, session_id);
                                 }
                             }
                         }
-                        x if x == PacketType::ConnectDeny as u8 => {
-                            if let PacketPayload::ConnectDeny(deny) = packet.payload {
-                                self.handle_connect_deny(deny, addr)?;
-                            }
-                        }
-                        _ => {
-                            self.forward_to_peers(&packet, addr)?;
-                            if let Some(session_id) = self.find_session_for_addr(addr) {
-                                self.update_client_activity(packet.client_id, session_id);
-                            }
+                    } else {
+                        self.forward_to_peers(&packet, addr)?;
+                        if let Some(session_id) = self.find_session_for_addr(addr) {
+                            self.update_client_activity(packet.client_id, session_id);
                         }
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    // No packets available, continue to cleanup check
+                    // No packets available
                 }
                 Err(e) => return Err(e),
             }
@@ -442,6 +510,10 @@ impl RelayNode {
             "[Relay] Client '{}' from {} requesting to join session {}",
             req.desired_name, client_addr, target_session
         );
+        
+        if let Some(game_id) = req.game_identifier {
+            println!("[Relay]   Game ID: 0x{:08X}", game_id);
+        }
 
         if let Some(host_addr) = self.hosts.get(&target_session) {
             println!(
@@ -459,7 +531,7 @@ impl RelayNode {
             );
 
             let forward_packet = NeonPacket {
-                packet_type: PacketType::ConnectRequest as u8,
+                packet_type: CorePacketType::ConnectRequest as u8,
                 sequence: 1,
                 client_id: 0,
                 destination_id: 1,
@@ -503,7 +575,7 @@ impl RelayNode {
             );
             
             let deny_packet = NeonPacket {
-                packet_type: PacketType::ConnectDeny as u8,
+                packet_type: CorePacketType::ConnectDeny as u8,
                 sequence: 1,
                 client_id: 0,
                 destination_id: 0,
@@ -540,7 +612,7 @@ impl RelayNode {
             );
 
             let response_packet = NeonPacket {
-                packet_type: PacketType::ConnectAccept as u8,
+                packet_type: CorePacketType::ConnectAccept as u8,
                 sequence: 1,
                 client_id,
                 destination_id: client_id,
@@ -548,7 +620,6 @@ impl RelayNode {
             };
 
             self.socket.send_packet(&response_packet, client_addr)?;
-
             self.pending_connections.remove(&client_addr);
         } else {
             println!("[Relay] No pending connection found for ConnectAccept");
@@ -604,36 +675,36 @@ impl RelayNode {
     }
 
     fn forward_to_peers(&self, packet: &NeonPacket, sender_addr: SocketAddr) -> Result<(), Error> {
-            for (_session_id, peers) in &self.sessions {
-                if let Some(_sender) = peers.iter().find(|p| p.addr == sender_addr) {
-                    if let Some(dest_peer) = peers.iter().find(|p| p.client_id == packet.destination_id) {
-                        if dest_peer.addr != sender_addr {
-                            match self.socket.send_packet(packet, dest_peer.addr) {
-                                Ok(()) => {
-                                    // Successfully forwarded
-                                }
-                                Err(e) => {
-                                    println!(
-                                        "[Relay] Failed to forward packet from {} to client {} at {}: {}",
-                                        sender_addr, packet.destination_id, dest_peer.addr, e
-                                    );
-                                }
+        for (_session_id, peers) in &self.sessions {
+            if let Some(_sender) = peers.iter().find(|p| p.addr == sender_addr) {
+                if let Some(dest_peer) = peers.iter().find(|p| p.client_id == packet.destination_id) {
+                    if dest_peer.addr != sender_addr {
+                        match self.socket.send_packet(packet, dest_peer.addr) {
+                            Ok(()) => {
+                                // Successfully forwarded
+                            }
+                            Err(e) => {
+                                println!(
+                                    "[Relay] Failed to forward packet from {} to client {} at {}: {}",
+                                    sender_addr, packet.destination_id, dest_peer.addr, e
+                                );
                             }
                         }
-                    } else {
-                        println!(
-                            "[Relay] Destination client {} not found in session, dropping packet from {}",
-                            packet.destination_id, sender_addr
-                        );
                     }
-                    
-                    return Ok(());
+                } else {
+                    println!(
+                        "[Relay] Destination client {} not found in session, dropping packet from {}",
+                        packet.destination_id, sender_addr
+                    );
                 }
+                
+                return Ok(());
             }
-
-            println!("[Relay] Unknown sender: {}, dropping packet", sender_addr);
-            Ok(())
         }
+
+        println!("[Relay] Unknown sender: {}, dropping packet", sender_addr);
+        Ok(())
+    }
 
     fn print_active_sessions(&self) {
         println!("\n=== Active Sessions ===");
@@ -665,9 +736,10 @@ impl RelayNode {
 }
 
 fn main() {
-    println!("Project Neon Alpha Build 12 - Relay");
+    println!("Project Neon Protocol v0.2 - Relay");
     println!("===================================");
     println!("Starting relay node...");
+    println!();
 
     let mut relay = RelayNode::new("0.0.0.0:7777").expect("Failed to start relay");
     relay.run().expect("Relay failed");
