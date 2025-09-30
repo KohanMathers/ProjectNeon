@@ -283,13 +283,9 @@ impl NeonClient {
             packet_type: PacketType::ConnectRequest as u8,
             sequence: 1,
             client_id: 0,
-            destination_id: 1, // always send to host
+            destination_id: 1,
             payload: PacketPayload::ConnectRequest(connect_req.clone()),
         };
-
-        // Debug: print raw bytes of ConnectRequest
-        let payload_bytes = PacketPayload::ConnectRequest(connect_req).to_bytes();
-        println!("[DEBUG] ConnectRequest raw bytes: {:?}", payload_bytes);
 
         println!("Attempting to connect to session {} via relay...", target_session_id);
         self.socket.send_packet(&connect_packet, relay_addr)?;
@@ -316,7 +312,7 @@ impl NeonClient {
                 packet_type: PacketType::ConnectAccept as u8,
                 sequence: 2,
                 client_id,
-                destination_id: 1, // always send to host
+                destination_id: 1,
                 payload: PacketPayload::ConnectAccept(accept),
             };
             self.socket.send_packet(&register_packet, relay_addr)?;
@@ -339,7 +335,7 @@ impl NeonClient {
                 packet_type: PacketType::Ping as u8,
                 sequence: 10,
                 client_id,
-                destination_id: 1, // always send to host
+                destination_id: 1,
                 payload: PacketPayload::Ping(Ping { timestamp }),
             };
 
@@ -370,6 +366,8 @@ impl NeonClient {
                                     println!("Unhandled packet: {:?}", packet);
                                 }
                         }
+                    } else {
+                        println!("Packet not for me! My ID: {} Packet ID: {}", self.client_id.unwrap(), packet.client_id)
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {

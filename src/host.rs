@@ -297,7 +297,7 @@ impl HostSession {
             packet_type: PacketType::ConnectAccept as u8,
             sequence: 0,
             client_id: self.client_id,
-            destination_id: 1, // always to relay/host
+            destination_id: 1,
             payload: PacketPayload::ConnectAccept(ConnectAccept {
                 assigned_client_id: self.client_id,
                 session_id: self.session_id,
@@ -318,7 +318,7 @@ impl HostSession {
                             packet_type: PacketType::Pong as u8,
                             sequence: packet.sequence,
                             client_id: self.client_id,
-                            destination_id: packet.client_id, // reply to the client
+                            destination_id: packet.client_id,
                             payload: PacketPayload::Pong(Pong {
                                 original_timestamp: ping.timestamp,
                             }),
@@ -368,7 +368,7 @@ impl HostSession {
             packet_type: PacketType::ConnectAccept as u8,
             sequence: 1,
             client_id: assigned_id,
-            destination_id: assigned_id, // send to the new client
+            destination_id: assigned_id,
             payload: PacketPayload::ConnectAccept(accept.clone()),
         };
 
@@ -388,7 +388,7 @@ impl HostSession {
             packet_type: PacketType::SessionConfig as u8,
             sequence: 2,
             client_id: assigned_id,
-            destination_id: assigned_id, // send to the new client
+            destination_id: assigned_id,
             payload: PacketPayload::SessionConfig(config),
         };
 

@@ -423,11 +423,6 @@ impl RelayNode {
             "[Relay] Client '{}' from {} requesting to join session {}",
             req.desired_name, client_addr, target_session
         );
-        // Debug: print raw bytes of ConnectRequest as received
-        let mut debug_bytes = vec![req.client_version];
-        debug_bytes.extend(&req.target_session_id.to_le_bytes());
-        debug_bytes.extend(req.desired_name.as_bytes());
-        println!("[DEBUG] Received ConnectRequest raw bytes: {:?}", debug_bytes);
 
         if let Some(host_addr) = self.hosts.get(&target_session) {
             println!(
@@ -448,12 +443,9 @@ impl RelayNode {
                 packet_type: PacketType::ConnectRequest as u8,
                 sequence: 1,
                 client_id: 0,
-                destination_id: 1, // always to host
+                destination_id: 1,
                 payload: PacketPayload::ConnectRequest(req.clone()),
             };
-            // Debug: print raw bytes of ConnectRequest as forwarded
-            let payload_bytes = PacketPayload::ConnectRequest(req).to_bytes();
-            println!("[DEBUG] Forwarded ConnectRequest raw bytes: {:?}", payload_bytes);
 
             self.socket.send_packet(&forward_packet, *host_addr)?;
         } else {
@@ -490,7 +482,7 @@ impl RelayNode {
                 packet_type: PacketType::ConnectAccept as u8,
                 sequence: 1,
                 client_id,
-                destination_id: client_id, // to the client
+                destination_id: client_id,
                 payload: PacketPayload::ConnectAccept(accept),
             };
 
@@ -551,33 +543,36 @@ impl RelayNode {
     }
 
     fn forward_to_peers(&self, packet: &NeonPacket, sender_addr: SocketAddr) -> Result<(), Error> {
-        for (session_id, peers) in &self.sessions {
-            if let Some(sender) = peers.iter().find(|p| p.addr == sender_addr) {
-                let mut forwarded = false;
-
-                for peer in peers {
-                    if peer.addr != sender_addr {
-                        match self.socket.send_packet(packet, peer.addr) {
-                            Ok(()) => {
-                                forwarded = true;
-                            }
-                            Err(e) => {
-                                println!(
-                                    "[Relay] Failed to forward packet to {}: {}",
-                                    peer.addr, e
-                                );
+            for (_session_id, peers) in &self.sessions {
+                if let Some(_sender) = peers.iter().find(|p| p.addr == sender_addr) {
+                    if let Some(dest_peer) = peers.iter().find(|p| p.client_id == packet.destination_id) {
+                        if dest_peer.addr != sender_addr {
+                            match self.socket.send_packet(packet, dest_peer.addr) {
+                                Ok(()) => {
+                                    // Successfully forwarded
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "[Relay] Failed to forward packet from {} to client {} at {}: {}",
+                                        sender_addr, packet.destination_id, dest_peer.addr, e
+                                    );
+                                }
                             }
                         }
+                    } else {
+                        println!(
+                            "[Relay] Destination client {} not found in session, dropping packet from {}",
+                            packet.destination_id, sender_addr
+                        );
                     }
+                    
+                    return Ok(());
                 }
-
-                return Ok(());
             }
-        }
 
-        println!("[Relay] Unknown sender: {}, dropping packet", sender_addr);
-        Ok(())
-    }
+            println!("[Relay] Unknown sender: {}, dropping packet", sender_addr);
+            Ok(())
+        }
 
     fn print_active_sessions(&self) {
         println!("\n=== Active Sessions ===");
