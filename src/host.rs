@@ -24,6 +24,7 @@ enum PacketPayload {
     Pong(Pong),
     ConnectRequest(ConnectRequest),
     ConnectAccept(ConnectAccept),
+    ConnectDeny(ConnectDeny),
     SessionConfig(SessionConfig),
 }
 
@@ -47,6 +48,11 @@ struct ConnectRequest {
 struct ConnectAccept {
     assigned_client_id: u8,
     session_id: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectDeny {
+    reason: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,6 +115,9 @@ impl PacketPayload {
                 bytes.extend(&accept.session_id.to_le_bytes());
                 bytes
             }
+            PacketPayload::ConnectDeny(deny) => {
+                deny.reason.as_bytes().to_vec()
+            }
             PacketPayload::SessionConfig(config) => {
                 let mut bytes = vec![config.version];
                 bytes.extend(&config.tick_rate.to_le_bytes());
@@ -165,6 +174,10 @@ impl PacketPayload {
                     assigned_client_id: client_id,
                     session_id,
                 }))
+            }
+            x if x == PacketType::ConnectDeny as u8 => {
+                let reason = String::from_utf8_lossy(data).to_string();
+                Ok(PacketPayload::ConnectDeny(ConnectDeny { reason }))
             }
             x if x == PacketType::SessionConfig as u8 => {
                 if data.len() < 11 {
@@ -271,7 +284,7 @@ pub struct HostSession {
     relay_addr: SocketAddr,
     client_id: u8,
     session_id: u32,
-    connected_clients: HashMap<u8, SocketAddr>,
+    connected_clients: HashMap<u8, String>,
     next_client_id: u8,
 }
 
@@ -338,6 +351,10 @@ impl HostSession {
         }
     }
 
+    fn is_name_taken(&self, name: &str) -> bool {
+        self.connected_clients.values().any(|n| n == name)
+    }
+
     fn handle_connect_request(
         &mut self,
         req: ConnectRequest,
@@ -348,6 +365,27 @@ impl HostSession {
                 "[Host] Client '{}' requested wrong session {} (we are {}), ignoring",
                 req.desired_name, req.target_session_id, self.session_id
             );
+            return Ok(());
+        }
+
+        if self.is_name_taken(&req.desired_name) {
+            println!(
+                "[Host] Client '{}' rejected - name already in use",
+                req.desired_name
+            );
+
+            let deny_packet = NeonPacket {
+                packet_type: PacketType::ConnectDeny as u8,
+                sequence: 1,
+                client_id: 1,
+                destination_id: 0,
+                payload: PacketPayload::ConnectDeny(ConnectDeny {
+                    reason: format!("Name '{}' is already in use", req.desired_name),
+                }),
+            };
+
+            self.socket.send_packet(&deny_packet, self.relay_addr)?;
+            println!("[Host] Sent ConnectDeny to relay for duplicate name");
             return Ok(());
         }
 
@@ -398,7 +436,10 @@ impl HostSession {
             assigned_id
         );
 
-        println!("[Host] Client {} accepted and configured", assigned_id);
+        // Add client to connected_clients map
+        self.connected_clients.insert(assigned_id, req.desired_name.clone());
+        println!("[Host] Client {} ('{}') accepted and configured", assigned_id, req.desired_name);
+        
         Ok(())
     }
 }

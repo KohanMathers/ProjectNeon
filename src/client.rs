@@ -23,6 +23,7 @@ enum PacketPayload {
     Pong(Pong),
     ConnectRequest(ConnectRequest),
     ConnectAccept(ConnectAccept),
+    ConnectDeny(ConnectDeny),
     SessionConfig(SessionConfig),
 }
 
@@ -46,6 +47,11 @@ struct ConnectRequest {
 struct ConnectAccept {
     assigned_client_id: u8,
     session_id: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectDeny {
+    reason: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,6 +114,9 @@ impl PacketPayload {
                 bytes.extend(&accept.session_id.to_le_bytes());
                 bytes
             }
+            PacketPayload::ConnectDeny(deny) => {
+                deny.reason.as_bytes().to_vec()
+            }
             PacketPayload::SessionConfig(config) => {
                 let mut bytes = vec![config.version];
                 bytes.extend(&config.tick_rate.to_le_bytes());
@@ -158,6 +167,10 @@ impl PacketPayload {
                     assigned_client_id: client_id,
                     session_id,
                 }))
+            }
+            x if x == PacketType::ConnectDeny as u8 => {
+                let reason = String::from_utf8_lossy(data).to_string();
+                Ok(PacketPayload::ConnectDeny(ConnectDeny { reason }))
             }
             x if x == PacketType::SessionConfig as u8 => {
                 if data.len() < 11 {
@@ -319,6 +332,8 @@ impl NeonClient {
 
             println!("Successfully connected to session {}! Assigned client ID: {}", session_id, client_id);
             Ok(())
+        } else if let PacketPayload::ConnectDeny(deny) = response.payload {
+            Err(Error::new(ErrorKind::ConnectionRefused, deny.reason))
         } else {
             Err(Error::new(ErrorKind::ConnectionAborted, "Invalid ConnectAccept response"))
         }
@@ -443,10 +458,6 @@ fn main() {
         }
         Err(e) => {
             println!("Failed to connect to session: {}", e);
-            println!("Make sure:");
-            println!("1. The relay server is running");
-            println!("2. A host is running with the specified session ID");
-            println!("3. The session ID is correct");
             return;
         }
     }

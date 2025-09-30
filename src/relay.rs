@@ -22,6 +22,7 @@ enum PacketPayload {
     Pong(Pong),
     ConnectRequest(ConnectRequest),
     ConnectAccept(ConnectAccept),
+    ConnectDeny(ConnectDeny),
     SessionConfig(SessionConfig),
 }
 
@@ -40,10 +41,16 @@ struct ConnectRequest {
     desired_name: String,
     target_session_id: u32,
 }
+
 #[derive(Debug, Clone)]
 struct ConnectAccept {
     assigned_client_id: u8,
     session_id: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectDeny {
+    reason: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -145,6 +152,9 @@ impl PacketPayload {
                 bytes.extend(&accept.session_id.to_le_bytes());
                 bytes
             }
+            PacketPayload::ConnectDeny(deny) => {
+                deny.reason.as_bytes().to_vec()
+            }
             PacketPayload::SessionConfig(config) => {
                 let mut bytes = vec![config.version];
                 bytes.extend(&config.tick_rate.to_le_bytes());
@@ -201,6 +211,10 @@ impl PacketPayload {
                     assigned_client_id: client_id,
                     session_id,
                 }))
+            }
+            x if x == PacketType::ConnectDeny as u8 => {
+                let reason = String::from_utf8_lossy(data).to_string();
+                Ok(PacketPayload::ConnectDeny(ConnectDeny { reason }))
             }
             x if x == PacketType::SessionConfig as u8 => {
                 if data.len() < 11 {
@@ -389,6 +403,11 @@ impl RelayNode {
                                 }
                             }
                         }
+                        x if x == PacketType::ConnectDeny as u8 => {
+                            if let PacketPayload::ConnectDeny(deny) = packet.payload {
+                                self.handle_connect_deny(deny, addr)?;
+                            }
+                        }
                         _ => {
                             self.forward_to_peers(&packet, addr)?;
                             if let Some(session_id) = self.find_session_for_addr(addr) {
@@ -455,6 +474,48 @@ impl RelayNode {
             );
         }
 
+        Ok(())
+    }
+
+    fn handle_connect_deny(
+        &mut self,
+        deny: ConnectDeny,
+        host_addr: SocketAddr,
+    ) -> Result<(), Error> {
+        let mut client_addr_to_send = None;
+        
+        for (session_id, host) in &self.hosts {
+            if *host == host_addr {
+                for (addr, pending) in &self.pending_connections {
+                    if pending.session_id == *session_id {
+                        client_addr_to_send = Some(*addr);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        
+        if let Some(client_addr) = client_addr_to_send {
+            println!(
+                "[Relay] Routing ConnectDeny back to {}",
+                client_addr
+            );
+            
+            let deny_packet = NeonPacket {
+                packet_type: PacketType::ConnectDeny as u8,
+                sequence: 1,
+                client_id: 0,
+                destination_id: 0,
+                payload: PacketPayload::ConnectDeny(deny),
+            };
+            
+            self.socket.send_packet(&deny_packet, client_addr)?;
+            self.pending_connections.remove(&client_addr);
+        } else {
+            println!("[Relay] No pending connection found for ConnectDeny");
+        }
+        
         Ok(())
     }
 
