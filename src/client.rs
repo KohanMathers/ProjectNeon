@@ -340,20 +340,24 @@ impl NeonClient {
         loop {
             match self.socket.receive_packet() {
                 Ok((packet, _)) => {
-                    match packet.payload {
-                        PacketPayload::Pong(pong) => {
-                            let pong_time = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
-                            println!("Got pong! Response time: {} ms", (pong_time - pong.original_timestamp));
+                    if packet.destination_id == self.client_id.unwrap() {
+                        match packet.payload {
+                                PacketPayload::Pong(pong) => {
+                                    let pong_time = SystemTime::now()
+                                        .duration_since(SystemTime::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis() as u64;
+                                    println!("Got pong! Response time: {} ms", (pong_time - pong.original_timestamp));
+                                }
+                                PacketPayload::SessionConfig(config) => {
+                                    println!("Session config: {:?}", config);
+                                }
+                                _ => {
+                                    println!("Unhandled packet: {:?}", packet);
+                                }
                         }
-                        PacketPayload::SessionConfig(config) => {
-                            println!("Session config: {:?}", config);
-                        }
-                        _ => {
-                            println!("Unhandled packet: {:?}", packet);
-                        }
+                    } else {
+                        println!("Packet not for me! My ID: {} Packet ID: {}", self.client_id.unwrap(), packet.client_id)
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
