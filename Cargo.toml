@@ -4,17 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bitflags = "2.4"
+bitflags = "2.9.4"
 rand = "0.9.2"
 
 [[bin]]
 name = "relay"
-path = "src/relay.rs"
+path = "src/relay/main.rs"
 
 [[bin]]
 name = "client"
-path = "src/client.rs"
+path = "src/client/main.rs"
 
 [[bin]]
 name = "host"
-path = "src/host.rs"
+path = "src/host/main.rs"
