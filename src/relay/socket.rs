@@ -1,6 +1,6 @@
 use std::io::Error;
 use std::net::{SocketAddr, UdpSocket};
-use crate::types::{NeonPacket, PacketHeader, PacketPayload};
+use super::types::{NeonPacket, PacketHeader, PacketPayload};
 
 pub struct NeonSocket {
     socket: UdpSocket,
@@ -43,7 +43,7 @@ impl NeonSocket {
                 client_id: header.client_id,
                 destination_id: header.destination_id,
                 payload,
-            },
+            },  
             addr,
         ))
     }

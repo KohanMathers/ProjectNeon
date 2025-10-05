@@ -1,6 +1,6 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::io::{Error, ErrorKind};
-use crate::types::*;
+use super::types::*;
 
 pub struct NeonSocket {
     pub socket: UdpSocket,

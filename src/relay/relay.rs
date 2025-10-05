@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use crate::socket::NeonSocket;
-use crate::session::SessionManager;
-use crate::types::*;
+use super::socket::NeonSocket;
+use super::session::SessionManager;
+use super::types::*;
 
 pub struct RelayNode {
     socket: NeonSocket,
@@ -266,5 +266,15 @@ impl RelayNode {
 
         println!("[Relay] Unknown sender: {}, dropping packet", sender_addr);
         Ok(())
+    }
+
+    pub fn session_count(&self) -> usize {
+        self.session_manager.sessions.len()
+    }
+
+    pub fn total_client_count(&self) -> usize {
+        self.session_manager.sessions.values()
+            .map(|peers| peers.len())
+            .sum()
     }
 }

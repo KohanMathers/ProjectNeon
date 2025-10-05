@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 use std::io::{Error, ErrorKind};
 use std::time::{SystemTime, Duration};
-use crate::types::*;
-use crate::incoming::NeonSocket;
+use super::types::*;
+use super::incoming::NeonSocket;
 
 pub fn send_connect_request(
     socket: &NeonSocket,

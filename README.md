@@ -239,6 +239,132 @@ match packet.header.packet_type {
 }
 ```
 
+---
+
+## Usage
+
+### Building from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/KohanMathers/ProjectNeon
+cd ProjectNeon
+
+# Build release binaries
+cargo build --release
+
+# Binaries will be in target/release/
+# - relay (standalone relay server)
+# - client (example client)
+# - host (example host)
+# - libproject_neon.so (C FFI library)
+```
+
+### Using Precompiled Binaries
+
+#### Running the Relay Server
+
+```bash
+# Start relay on default port (7777)
+./relay
+
+# Or specify a custom address
+./relay --bind 0.0.0.0:8888
+```
+
+#### C/C++ Integration
+
+For integrating with C/C++ applications (Unreal Engine, Unity, custom engines):
+
+**Required Files:**
+- `libproject_neon.so` (Linux) / `project_neon.dll` (Windows) / `libproject_neon.dylib` (macOS)
+- `project_neon.h`
+
+**Basic Usage:**
+
+```c
+#include "project_neon.h"
+
+// Create and connect a client
+NeonClientHandle* client = neon_client_new("PlayerName");
+if (neon_client_connect(client, 12345, "127.0.0.1:7777")) {
+    printf("Connected! Client ID: %u\n", neon_client_get_id(client));
+}
+
+// In your game loop
+while (game_running) {
+    neon_client_process_packets(client);
+    // Your game logic here
+}
+
+// Cleanup
+neon_client_free(client);
+```
+
+**Host Example:**
+
+```c
+// Create host (blocking call - run in thread!)
+NeonHostHandle* host = neon_host_new(12345, "127.0.0.1:7777");
+
+// Start host in separate thread
+pthread_create(&thread, NULL, host_thread, host);
+
+// Check connected clients
+size_t count = neon_host_get_client_count(host);
+```
+
+#### Linking in Your Build System
+
+**CMake:**
+```cmake
+target_include_directories(YourProject PRIVATE ${NEON_INCLUDE_DIR})
+target_link_libraries(YourProject ${NEON_LIB_DIR}/libproject_neon.so)
+```
+
+**Unreal Engine (.Build.cs):**
+```csharp
+PublicIncludePaths.Add(Path.Combine(ModuleDirectory, "ThirdParty/Neon/include"));
+PublicAdditionalLibraries.Add(Path.Combine(ModuleDirectory, "ThirdParty/Neon/lib/project_neon.dll"));
+```
+
+**Manual GCC:**
+```bash
+gcc -o mygame main.c -I./include -L./lib -lproject_neon -lpthread -Wl,-rpath,./lib
+```
+
+### Rust Integration
+
+```toml
+[dependencies]
+project_neon = { path = "../projectneon" }
+```
+
+```rust
+use project_neon::{NeonClient, NeonHost, NeonRelay};
+
+let mut client = NeonClient::new("PlayerName".to_string())?;
+client.connect(12345, "127.0.0.1:7777")?;
+
+loop {
+    client.process_packets()?;
+    // Your game logic
+}
+```
+
+### Testing Your Setup
+
+```bash
+# Terminal 1: Start relay
+./relay
+
+# Terminal 2: Run test client
+./test_neon
+```
+
+The test program will create a host and two clients, demonstrating the full connection flow.
+
+---
 
 ## Future Possibilities
 

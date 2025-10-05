@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::io::Error;
-use crate::types::*;
-use crate::incoming::NeonSocket;
+use super::types::*;
+use super::incoming::NeonSocket;
 
 pub fn send_host_registration(
     socket: &NeonSocket,

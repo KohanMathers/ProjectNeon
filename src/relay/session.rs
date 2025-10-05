@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use crate::types::PeerInfo;
+use super::types::PeerInfo;
 
 pub struct SessionManager {
     pub sessions: HashMap<u32, Vec<PeerInfo>>,
