@@ -1,5 +1,5 @@
 use std::net::{SocketAddr, UdpSocket};
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 use super::types::*;
 
 pub struct NeonSocket {
@@ -51,18 +51,18 @@ pub fn handle_ping(
     relay_addr: SocketAddr,
     host_client_id: u8,
     packet: &NeonPacket,
-    ping: &Ping,
 ) -> Result<(), Error> {
-    let pong_packet = NeonPacket {
-        packet_type: PacketType::Pong as u8,
-        sequence: packet.sequence,
-        client_id: host_client_id,
-        destination_id: packet.client_id,
-        payload: PacketPayload::Pong(Pong {
-            original_timestamp: ping.timestamp,
-        }),
-    };
-    socket.send_packet(&pong_packet, relay_addr)?;
-    println!("[Host] Responded to ping from client {}", packet.client_id);
+    if let PacketPayload::Ping(ping) = &packet.payload {
+        let pong_packet = NeonPacket {
+            packet_type: PacketType::Pong as u8,
+            sequence: packet.sequence,
+            client_id: host_client_id,
+            destination_id: packet.client_id,
+            payload: PacketPayload::Pong(Pong {
+                original_timestamp: ping.timestamp,
+            }),
+        };
+        socket.send_packet(&pong_packet, relay_addr)?;
+    }
     Ok(())
 }

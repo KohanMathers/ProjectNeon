@@ -10,6 +10,22 @@ pub struct NeonClientHandle {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+pub struct NeonHostHandle {
+    _private: [u8; 0],
+}
+
+pub type PongCallbackC = extern "C" fn(response_time_ms: u64, timestamp: u64);
+pub type SessionConfigCallbackC = extern "C" fn(version: u8, tick_rate: u16, max_packet_size: u16);
+pub type PacketTypeRegistryCallbackC = extern "C" fn(count: usize, ids: *const u8, names: *const *const c_char, descriptions: *const *const c_char);
+pub type UnhandledPacketCallbackC = extern "C" fn(packet_type: u8, from_client_id: u8);
+pub type WrongDestinationCallbackC = extern "C" fn(my_id: u8, packet_destination_id: u8);
+
+pub type ClientConnectCallbackC = extern "C" fn(client_id: u8, name: *const c_char, session_id: u32);
+pub type ClientDenyCallbackC = extern "C" fn(name: *const c_char, reason: *const c_char);
+pub type PingReceivedCallbackC = extern "C" fn(from_client_id: u8);
+pub type HostUnhandledPacketCallbackC = extern "C" fn(packet_type: u8, from_client_id: u8);
+
 /// Create a new Neon client
 /// Returns null on failure
 #[unsafe(no_mangle)]
@@ -28,6 +44,109 @@ pub extern "C" fn neon_client_new(name: *const c_char) -> *mut NeonClientHandle 
         Ok(client) => Box::into_raw(Box::new(client)) as *mut NeonClientHandle,
         Err(_) => ptr::null_mut(),
     }
+}
+
+/// Set callback for pong events
+#[unsafe(no_mangle)]
+pub extern "C" fn neon_client_set_pong_callback(
+    client: *mut NeonClientHandle,
+    callback: PongCallbackC,
+) {
+    if client.is_null() {
+        return;
+    }
+
+    let client = unsafe { &mut *(client as *mut NeonClient) };
+    client.on_pong(move |response_time, timestamp| {
+        callback(response_time, timestamp);
+    });
+}
+
+/// Set callback for session config events
+#[unsafe(no_mangle)]
+pub extern "C" fn neon_client_set_session_config_callback(
+    client: *mut NeonClientHandle,
+    callback: SessionConfigCallbackC,
+) {
+    if client.is_null() {
+        return;
+    }
+
+    let client = unsafe { &mut *(client as *mut NeonClient) };
+    client.on_session_config(move |version, tick_rate, max_packet_size| {
+        callback(version, tick_rate, max_packet_size);
+    });
+}
+
+/// Set callback for packet type registry events
+#[unsafe(no_mangle)]
+pub extern "C" fn neon_client_set_packet_type_registry_callback(
+    client: *mut NeonClientHandle,
+    callback: PacketTypeRegistryCallbackC,
+) {
+    if client.is_null() {
+        return;
+    }
+
+    let client = unsafe { &mut *(client as *mut NeonClient) };
+    
+    client.on_packet_type_registry(move |entries| {
+        let count = entries.len();
+        let ids: Vec<u8> = entries.iter().map(|(id, _, _)| *id).collect();
+        
+        let names: Vec<*const c_char> = entries.iter()
+            .map(|(_, name, _)| {
+                CString::new(name.as_str()).unwrap().into_raw() as *const c_char
+            })
+            .collect();
+        
+        let descriptions: Vec<*const c_char> = entries.iter()
+            .map(|(_, _, desc)| {
+                CString::new(desc.as_str()).unwrap().into_raw() as *const c_char
+            })
+            .collect();
+        
+        callback(count, ids.as_ptr(), names.as_ptr(), descriptions.as_ptr());
+        
+        for name in names {
+            unsafe { CString::from_raw(name as *mut c_char) };
+        }
+        for desc in descriptions {
+            unsafe { CString::from_raw(desc as *mut c_char) };
+        }
+    });
+}
+
+/// Set callback for unhandled packet events
+#[unsafe(no_mangle)]
+pub extern "C" fn neon_client_set_unhandled_packet_callback(
+    client: *mut NeonClientHandle,
+    callback: UnhandledPacketCallbackC,
+) {
+    if client.is_null() {
+        return;
+    }
+
+    let client = unsafe { &mut *(client as *mut NeonClient) };
+    client.on_unhandled_packet(move |packet_type, from_client_id| {
+        callback(packet_type, from_client_id);
+    });
+}
+
+/// Set callback for wrong destination events
+#[unsafe(no_mangle)]
+pub extern "C" fn neon_client_set_wrong_destination_callback(
+    client: *mut NeonClientHandle,
+    callback: WrongDestinationCallbackC,
+) {
+    if client.is_null() {
+        return;
+    }
+
+    let client = unsafe { &mut *(client as *mut NeonClient) };
+    client.on_wrong_destination(move |my_id, packet_destination_id| {
+        callback(my_id, packet_destination_id);
+    });
 }
 
 /// Connect the client to a session
@@ -129,11 +248,6 @@ pub extern "C" fn neon_client_free(client: *mut NeonClientHandle) {
     }
 }
 
-#[repr(C)]
-pub struct NeonHostHandle {
-    _private: [u8; 0],
-}
-
 /// Create a new Neon host
 /// Returns null on failure
 #[unsafe(no_mangle)]
@@ -152,6 +266,73 @@ pub extern "C" fn neon_host_new(session_id: u32, relay_addr: *const c_char) -> *
         Ok(host) => Box::into_raw(Box::new(host)) as *mut NeonHostHandle,
         Err(_) => ptr::null_mut(),
     }
+}
+
+/// Set callback for client connect events
+#[unsafe(no_mangle)]
+pub extern "C" fn neon_host_set_client_connect_callback(
+    host: *mut NeonHostHandle,
+    callback: ClientConnectCallbackC,
+) {
+    if host.is_null() {
+        return;
+    }
+
+    let host = unsafe { &mut *(host as *mut NeonHost) };
+    host.on_client_connect(move |client_id, name, session_id| {
+        let c_name = CString::new(name.as_str()).unwrap();
+        callback(client_id, c_name.as_ptr(), session_id);
+    });
+}
+
+/// Set callback for client deny events
+#[unsafe(no_mangle)]
+pub extern "C" fn neon_host_set_client_deny_callback(
+    host: *mut NeonHostHandle,
+    callback: ClientDenyCallbackC,
+) {
+    if host.is_null() {
+        return;
+    }
+
+    let host = unsafe { &mut *(host as *mut NeonHost) };
+    host.on_client_deny(move |name, reason| {
+        let c_name = CString::new(name.as_str()).unwrap();
+        let c_reason = CString::new(reason.as_str()).unwrap();
+        callback(c_name.as_ptr(), c_reason.as_ptr());
+    });
+}
+
+/// Set callback for ping received events
+#[unsafe(no_mangle)]
+pub extern "C" fn neon_host_set_ping_received_callback(
+    host: *mut NeonHostHandle,
+    callback: PingReceivedCallbackC,
+) {
+    if host.is_null() {
+        return;
+    }
+
+    let host = unsafe { &mut *(host as *mut NeonHost) };
+    host.on_ping_received(move |from_client_id| {
+        callback(from_client_id);
+    });
+}
+
+/// Set callback for unhandled packet events
+#[unsafe(no_mangle)]
+pub extern "C" fn neon_host_set_unhandled_packet_callback(
+    host: *mut NeonHostHandle,
+    callback: HostUnhandledPacketCallbackC,
+) {
+    if host.is_null() {
+        return;
+    }
+
+    let host = unsafe { &mut *(host as *mut NeonHost) };
+    host.on_unhandled_packet(move |packet_type, from_client_id, _addr| {
+        callback(packet_type, from_client_id);
+    });
 }
 
 /// Get the host's session ID

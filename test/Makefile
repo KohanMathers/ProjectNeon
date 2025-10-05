@@ -1,10 +1,16 @@
 CC = gcc
 CFLAGS = -Wall -I.
-LDFLAGS = -L. -lproject_neon -lpthread -Wl,-rpath,.
+
+ifeq ($(OS),Windows_NT)
+    LIB = project_neon.dll
+    LDFLAGS = -L. -lproject_neon -lpthread
+else
+    LIB = libproject_neon.so
+    LDFLAGS = -L. -lproject_neon -lpthread -Wl,-rpath,.
+endif
 
 TARGET = test_neon
 SRC = test_neon.c
-LIB = libproject_neon.so
 
 all: $(TARGET)
 

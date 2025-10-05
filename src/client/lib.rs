@@ -11,6 +11,12 @@ pub use types::{PacketPayload, NeonPacket};
 use incoming::{NeonSocket, process_incoming_packets};
 use outgoing::*;
 
+pub type PongCallback = Box<dyn FnMut(u64, u64) + Send>; // (response_time_ms, timestamp)
+pub type SessionConfigCallback = Box<dyn FnMut(u8, u16, u16) + Send>; // (version, tick_rate, max_packet_size)
+pub type PacketTypeRegistryCallback = Box<dyn FnMut(Vec<(u8, String, String)>) + Send>; // Vec<(id, name, description)>
+pub type UnhandledPacketCallback = Box<dyn FnMut(u8, u8) + Send>; // (packet_type, from_client_id)
+pub type WrongDestinationCallback = Box<dyn FnMut(u8, u8) + Send>; // (my_id, packet_destination_id)
+
 pub struct NeonClient {
     socket: NeonSocket,
     relay_addr: Option<SocketAddr>,
@@ -20,6 +26,12 @@ pub struct NeonClient {
     auto_ping: bool,
     ping_interval: Duration,
     last_ping: Option<Instant>,
+    
+    on_pong: Option<PongCallback>,
+    on_session_config: Option<SessionConfigCallback>,
+    on_packet_type_registry: Option<PacketTypeRegistryCallback>,
+    on_unhandled_packet: Option<UnhandledPacketCallback>,
+    on_wrong_destination: Option<WrongDestinationCallback>,
 }
 
 impl NeonClient {
@@ -34,7 +46,52 @@ impl NeonClient {
             auto_ping: true,
             ping_interval: Duration::from_secs(5),
             last_ping: None,
+            on_pong: None,
+            on_session_config: None,
+            on_packet_type_registry: None,
+            on_unhandled_packet: None,
+            on_wrong_destination: None,
         })
+    }
+
+    /// Set callback for when a pong is received
+    pub fn on_pong<F>(&mut self, callback: F)
+    where
+        F: FnMut(u64, u64) + Send + 'static,
+    {
+        self.on_pong = Some(Box::new(callback));
+    }
+
+    /// Set callback for when session config is received
+    pub fn on_session_config<F>(&mut self, callback: F)
+    where
+        F: FnMut(u8, u16, u16) + Send + 'static,
+    {
+        self.on_session_config = Some(Box::new(callback));
+    }
+
+    /// Set callback for when packet type registry is received
+    pub fn on_packet_type_registry<F>(&mut self, callback: F)
+    where
+        F: FnMut(Vec<(u8, String, String)>) + Send + 'static,
+    {
+        self.on_packet_type_registry = Some(Box::new(callback));
+    }
+
+    /// Set callback for unhandled packets
+    pub fn on_unhandled_packet<F>(&mut self, callback: F)
+    where
+        F: FnMut(u8, u8) + Send + 'static,
+    {
+        self.on_unhandled_packet = Some(Box::new(callback));
+    }
+
+    /// Set callback for packets sent to wrong destination
+    pub fn on_wrong_destination<F>(&mut self, callback: F)
+    where
+        F: FnMut(u8, u8) + Send + 'static,
+    {
+        self.on_wrong_destination = Some(Box::new(callback));
     }
 
     /// Set whether to automatically send pings (default: true)
@@ -90,7 +147,6 @@ impl NeonClient {
         };
         send_connect_accept_confirmation(&self.socket, relay_addr, assigned_client_id, accept)?;
 
-        println!("Successfully connected to session {}! Assigned client ID: {}", received_session_id, assigned_client_id);
         Ok(())
     }
 
@@ -117,7 +173,15 @@ impl NeonClient {
                 }
             }
 
-            process_incoming_packets(&self.socket, client_id)
+            process_incoming_packets(
+                &self.socket,
+                client_id,
+                &mut self.on_pong,
+                &mut self.on_session_config,
+                &mut self.on_packet_type_registry,
+                &mut self.on_unhandled_packet,
+                &mut self.on_wrong_destination,
+            )
         } else {
             Err(Error::new(ErrorKind::NotConnected, "Client not connected"))
         }

@@ -49,6 +49,30 @@ fn main() {
         }
     };
 
+    client.on_pong(|response_time, timestamp| {
+        println!("Got pong! Response time: {} ms @ {}", response_time, timestamp);
+    });
+
+    client.on_session_config(|version, tick_rate, max_packet_size| {
+        println!("Session config: version={}, tick_rate={}, max_packet_size={}", 
+                 version, tick_rate, max_packet_size);
+    });
+
+    client.on_packet_type_registry(|entries| {
+        println!("Received PacketTypeRegistry:");
+        for (id, name, description) in entries {
+            println!("  0x{:02X}: {} - {}", id, name, description);
+        }
+    });
+
+    client.on_unhandled_packet(|packet_type, from_client_id| {
+        println!("Unhandled packet type 0x{:02X} from client {}", packet_type, from_client_id);
+    });
+
+    client.on_wrong_destination(|my_id, packet_destination_id| {
+        println!("Packet not for me! My ID: {} Packet ID: {}", my_id, packet_destination_id);
+    });
+
     match client.connect(target_session_id, relay_addr) {
         Ok(()) => {
             println!("Connection successful! Starting main loop...");

@@ -46,6 +46,11 @@ impl NeonSocket {
 pub fn process_incoming_packets(
     socket: &NeonSocket,
     client_id: u8,
+    on_pong: &mut Option<Box<dyn FnMut(u64, u64) + Send>>,
+    on_session_config: &mut Option<Box<dyn FnMut(u8, u16, u16) + Send>>,
+    on_packet_type_registry: &mut Option<Box<dyn FnMut(Vec<(u8, String, String)>) + Send>>,
+    on_unhandled_packet: &mut Option<Box<dyn FnMut(u8, u8) + Send>>,
+    on_wrong_destination: &mut Option<Box<dyn FnMut(u8, u8) + Send>>,
 ) -> Result<(), Error> {
     loop {
         match socket.receive_packet() {
@@ -57,23 +62,37 @@ pub fn process_incoming_packets(
                                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
                                 .unwrap()
                                 .as_millis() as u64;
-                            println!("Got pong! Response time: {} ms", (pong_time - pong.original_timestamp));
+                            let response_time = pong_time - pong.original_timestamp;
+                            
+                            if let Some(callback) = on_pong {
+                                callback(response_time, pong_time);
+                            }
                         }
                         PacketPayload::SessionConfig(config) => {
-                            println!("Session config: {:?}", config);
+                            if let Some(callback) = on_session_config {
+                                callback(config.version, config.tick_rate, config.max_packet_size);
+                            }
                         }
                         PacketPayload::PacketTypeRegistry(registry) => {
-                            println!("Received PacketTypeRegistry:");
-                            for entry in registry.entries {
-                                println!("  0x{:02X}: {} - {}", entry.packet_id, entry.name, entry.description);
+                            let entries: Vec<(u8, String, String)> = registry.entries
+                                .into_iter()
+                                .map(|e| (e.packet_id, e.name, e.description))
+                                .collect();
+                            
+                            if let Some(callback) = on_packet_type_registry {
+                                callback(entries);
                             }
                         }
                         _ => {
-                            println!("Unhandled packet: {:?}", packet);
+                            if let Some(callback) = on_unhandled_packet {
+                                callback(packet.packet_type, packet.client_id);
+                            }
                         }
                     }
                 } else {
-                    println!("Packet not for me! My ID: {} Packet ID: {}", client_id, packet.client_id)
+                    if let Some(callback) = on_wrong_destination {
+                        callback(client_id, packet.destination_id);
+                    }
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
