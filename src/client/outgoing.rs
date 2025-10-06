@@ -65,7 +65,6 @@ pub fn send_ping(
         payload: PacketPayload::Ping(Ping { timestamp }),
     };
 
-    println!("Sending ping @ {}", timestamp);
     socket.send_packet(&packet, relay_addr)
 }
 
