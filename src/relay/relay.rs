@@ -258,6 +258,7 @@ impl RelayNode {
                         "[Relay] Destination client {} not found in session, dropping packet from {}",
                         packet.destination_id, sender_addr
                     );
+                    println!("{:?}", packet)
                 }
                 
                 return Ok(());

@@ -21,6 +21,7 @@ pub enum PacketPayload {
     ConnectDeny(ConnectDeny),
     SessionConfig(SessionConfig),
     PacketTypeRegistry(PacketTypeRegistry),
+    Ack(Ack),
     GamePacket(Vec<u8>),
 }
 
@@ -81,6 +82,11 @@ pub struct SessionConfig {
     pub max_packet_size: u16,
 }
 
+#[derive(Debug, Clone)]
+pub struct Ack {
+    pub acknowledged_sequences: Vec<u16>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum PacketType {
@@ -92,6 +98,7 @@ pub enum PacketType {
     Ping = 0x0B,
     Pong = 0x0C,
     DisconnectNotice = 0x0D,
+    Ack = 0x0E,
     GamePacket = 0x10,
 }
 
@@ -133,6 +140,14 @@ impl PacketPayload {
                     bytes.extend(name_bytes);
                     bytes.push(desc_bytes.len() as u8);
                     bytes.extend(desc_bytes);
+                }
+                bytes
+            }
+            PacketPayload::Ack(ack) => {
+                let mut bytes = Vec::new();
+                bytes.push(ack.acknowledged_sequences.len() as u8);
+                for seq in &ack.acknowledged_sequences {
+                    bytes.extend(&seq.to_le_bytes());
                 }
                 bytes
             }
@@ -207,18 +222,48 @@ impl PacketPayload {
                 }
                 let mut idx = 0;
                 let mut entries = Vec::new();
+                if idx >= data.len() {
+                    return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed"));
+                }
                 let count = data[idx] as usize;
                 idx += 1;
                 for _ in 0..count {
-                    if idx >= data.len() { break; }
+                    // need at least packet_id and name_len
+                    if idx + 2 > data.len() {
+                        return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed"));
+                    }
                     let packet_id = data[idx]; idx += 1;
                     let name_len = data[idx] as usize; idx += 1;
+                    if idx + name_len > data.len() {
+                        return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed"));
+                    }
                     let name = String::from_utf8_lossy(&data[idx..idx+name_len]).to_string(); idx += name_len;
+                    if idx >= data.len() {
+                        return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed"));
+                    }
                     let desc_len = data[idx] as usize; idx += 1;
+                    if idx + desc_len > data.len() {
+                        return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed"));
+                    }
                     let description = String::from_utf8_lossy(&data[idx..idx+desc_len]).to_string(); idx += desc_len;
                     entries.push(PacketTypeEntry { packet_id, name, description });
                 }
                 Ok(PacketPayload::PacketTypeRegistry(PacketTypeRegistry { entries }))
+            }
+            x if x == PacketType::Ack as u8 => {
+                if data.is_empty() {
+                    return Ok(PacketPayload::Ack(Ack { acknowledged_sequences: vec![] }));
+                }
+                let count = data[0] as usize;
+                let mut sequences = Vec::new();
+                let mut offset = 1;
+                for _ in 0..count {
+                    if offset + 2 <= data.len() {
+                        sequences.push(u16::from_le_bytes([data[offset], data[offset + 1]]));
+                        offset += 2;
+                    }
+                }
+                Ok(PacketPayload::Ack(Ack { acknowledged_sequences: sequences }))
             }
             x if x >= 0x10 => {
                 Ok(PacketPayload::GamePacket(data.to_vec()))

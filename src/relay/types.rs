@@ -22,6 +22,7 @@ pub enum PacketPayload {
     ConnectAccept(ConnectAccept),
     ConnectDeny(ConnectDeny),
     SessionConfig(SessionConfig),
+    Ack(Ack),
     PacketTypeRegistry(PacketTypeRegistry),
     GamePacket(Vec<u8>),
 }
@@ -72,6 +73,11 @@ pub struct SessionConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct Ack {
+    pub acknowledged_sequences: Vec<u16>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PacketTypeRegistry {
     pub entries: Vec<PacketTypeEntry>,
 }
@@ -94,6 +100,7 @@ pub enum CorePacketType {
     Ping = 0x0B,
     Pong = 0x0C,
     DisconnectNotice = 0x0D,
+    Ack = 0x0E,
 }
 
 #[derive(Debug, Clone)]
@@ -187,19 +194,29 @@ impl PacketPayload {
             }
             PacketPayload::PacketTypeRegistry(registry) => {
                 let mut bytes = Vec::new();
-                bytes.extend(&(registry.entries.len() as u16).to_le_bytes());
-                
+                // Use a single byte for entry count to match client/host parsing
+                bytes.push(registry.entries.len() as u8);
+
                 for entry in &registry.entries {
                     bytes.push(entry.packet_id);
                     let name_bytes = entry.name.as_bytes();
                     bytes.push(name_bytes.len() as u8);
                     bytes.extend(name_bytes);
-                    
+
                     let desc_bytes = entry.description.as_bytes();
-                    bytes.extend(&(desc_bytes.len() as u16).to_le_bytes());
+                    // Use a single byte for description length to match client/host parsing
+                    bytes.push(desc_bytes.len() as u8);
                     bytes.extend(desc_bytes);
                 }
-                
+
+                bytes
+            }
+            PacketPayload::Ack(ack) => {
+                let mut bytes = Vec::new();
+                bytes.push(ack.acknowledged_sequences.len() as u8);
+                for seq in &ack.acknowledged_sequences {
+                    bytes.extend(&seq.to_le_bytes());
+                }
                 bytes
             }
             PacketPayload::GamePacket(data) => data.clone(),
@@ -293,19 +310,39 @@ impl PacketPayload {
                 if data.is_empty() {
                     return Ok(PacketPayload::PacketTypeRegistry(PacketTypeRegistry { entries: vec![] }));
                 }
-                let entry_count = data[0] as usize;
+                let mut offset = 0;
+                if offset >= data.len() { return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed")); }
+                let entry_count = data[offset] as usize;
+                offset += 1;
                 let mut entries = Vec::new();
-                let mut offset = 1;
                 for _ in 0..entry_count {
-                    if offset >= data.len() { break; }
+                    if offset + 2 > data.len() { return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed")); }
                     let packet_id = data[offset]; offset += 1;
                     let name_len = data[offset] as usize; offset += 1;
+                    if offset + name_len > data.len() { return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed")); }
                     let name = String::from_utf8_lossy(&data[offset..offset + name_len]).to_string(); offset += name_len;
+                    if offset >= data.len() { return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed")); }
                     let desc_len = data[offset] as usize; offset += 1;
+                    if offset + desc_len > data.len() { return Err(Error::new(ErrorKind::InvalidData, "PacketTypeRegistry malformed")); }
                     let description = String::from_utf8_lossy(&data[offset..offset + desc_len]).to_string(); offset += desc_len;
                     entries.push(PacketTypeEntry { packet_id, name, description });
                 }
                 Ok(PacketPayload::PacketTypeRegistry(PacketTypeRegistry { entries }))
+            }
+            x if x == CorePacketType::Ack as u8 => {
+                if data.is_empty() {
+                    return Ok(PacketPayload::Ack(Ack { acknowledged_sequences: vec![] }));
+                }
+                let count = data[0] as usize;
+                let mut sequences = Vec::new();
+                let mut offset = 1;
+                for _ in 0..count {
+                    if offset + 2 <= data.len() {
+                        sequences.push(u16::from_le_bytes([data[offset], data[offset + 1]]));
+                        offset += 2;
+                    }
+                }
+                Ok(PacketPayload::Ack(Ack { acknowledged_sequences: sequences }))
             }
             x if x >= 0x10 => Ok(PacketPayload::GamePacket(data.to_vec())),
             _ => Ok(PacketPayload::None),

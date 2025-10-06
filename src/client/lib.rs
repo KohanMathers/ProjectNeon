@@ -175,6 +175,7 @@ impl NeonClient {
 
             process_incoming_packets(
                 &self.socket,
+                self.relay_addr.unwrap(),
                 client_id,
                 &mut self.on_pong,
                 &mut self.on_session_config,

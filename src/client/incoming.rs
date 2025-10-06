@@ -14,7 +14,7 @@ impl NeonSocket {
     }
 
     pub fn send_packet(&self, packet: &NeonPacket, addr: SocketAddr) -> Result<(), Error> {
-        let header = PacketHeader {
+    let header = PacketHeader {
             magic: 0x4E45,
             version: 1,
             packet_type: packet.packet_type,
@@ -30,9 +30,9 @@ impl NeonSocket {
 
     pub fn receive_packet(&self) -> Result<(NeonPacket, SocketAddr), Error> {
         let mut buf = [0; 1024];
-        let (size, addr) = self.socket.recv_from(&mut buf)?;
-        let header = PacketHeader::from_bytes(&buf[..8])?;
-        let payload = PacketPayload::from_bytes(header.packet_type, &buf[8..size])?;
+    let (size, addr) = self.socket.recv_from(&mut buf)?;
+    let header = PacketHeader::from_bytes(&buf[..8])?;
+    let payload = PacketPayload::from_bytes(header.packet_type, &buf[8..size])?;
         Ok((NeonPacket {
             packet_type: header.packet_type,
             sequence: header.sequence,
@@ -45,6 +45,7 @@ impl NeonSocket {
 
 pub fn process_incoming_packets(
     socket: &NeonSocket,
+    relay_addr: SocketAddr,
     client_id: u8,
     on_pong: &mut Option<Box<dyn FnMut(u64, u64) + Send>>,
     on_session_config: &mut Option<Box<dyn FnMut(u8, u16, u16) + Send>>,
@@ -69,6 +70,8 @@ pub fn process_incoming_packets(
                             }
                         }
                         PacketPayload::SessionConfig(config) => {
+                            send_ack(socket, relay_addr, client_id, packet.sequence)?;
+
                             if let Some(callback) = on_session_config {
                                 callback(config.version, config.tick_rate, config.max_packet_size);
                             }
@@ -102,4 +105,22 @@ pub fn process_incoming_packets(
         }
     }
     Ok(())
+}
+
+fn send_ack(
+    socket: &NeonSocket,
+    relay_addr: SocketAddr,
+    client_id: u8,
+    sequence: u16,
+) -> Result<(), Error> {
+    let ack_packet = NeonPacket {
+        packet_type: PacketType::Ack as u8,
+        sequence: 0,
+        client_id,
+        destination_id: 1,
+        payload: PacketPayload::Ack(Ack {
+            acknowledged_sequences: vec![sequence],
+        }),
+    };
+    socket.send_packet(&ack_packet, relay_addr)
 }

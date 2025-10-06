@@ -7,6 +7,7 @@ use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
 use std::thread::sleep;
 use std::time::Duration;
+use std::time::Instant;
 
 use types::*;
 use incoming::{NeonSocket, handle_ping};
@@ -24,12 +25,16 @@ pub struct NeonHost {
     session_id: u32,
     connected_clients: HashMap<u8, String>,
     next_client_id: u8,
-    
+    pending_acks: HashMap<u8, PendingAck>,
+
     on_client_connect: Option<ClientConnectCallback>,
     on_client_deny: Option<ClientDenyCallback>,
     on_ping_received: Option<PingReceivedCallback>,
     on_unhandled_packet: Option<UnhandledPacketCallback>,
 }
+
+const ACK_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_RETRIES: u8 = 5;
 
 impl NeonHost {
     /// Create a new host with a specific session ID and relay address
@@ -44,6 +49,7 @@ impl NeonHost {
             session_id,
             connected_clients: HashMap::new(),
             next_client_id: 2,
+            pending_acks: HashMap::new(),
             on_client_connect: None,
             on_client_deny: None,
             on_ping_received: None,
@@ -103,10 +109,15 @@ impl NeonHost {
         send_host_registration(&self.socket, self.relay_addr, self.client_id, self.session_id)?;
 
         loop {
+            self.check_pending_acks()?;
+
             match self.socket.receive_packet() {
                 Ok((packet, addr)) => match packet.payload {
                     PacketPayload::ConnectRequest(req) => {
                         self.handle_connect_request(req, addr)?;
+                    }
+                    PacketPayload::Ack(ack) => {
+                        self.handle_ack(packet.client_id, ack)?;
                     }
                     PacketPayload::Ping(_) => {
                         handle_ping(&self.socket, self.relay_addr, self.client_id, &packet)?;
@@ -127,6 +138,45 @@ impl NeonHost {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    fn check_pending_acks(&mut self) -> Result<(), Error> {
+        let mut to_retry = Vec::new();
+        let mut to_remove = Vec::new();
+
+    for (client_id, pending) in &self.pending_acks {
+            if pending.sent_at.elapsed() >= ACK_TIMEOUT {
+                if pending.retry_count >= MAX_RETRIES {
+                    to_remove.push(*client_id);
+                } else {
+                    to_retry.push(*client_id);
+                }
+            }
+        }
+
+    for client_id in to_retry {
+            if let Some(pending) = self.pending_acks.get_mut(&client_id) {
+                self.socket.send_packet(&pending.packet, self.relay_addr)?;
+                pending.sent_at = Instant::now();
+                pending.retry_count += 1;
+            }
+        }
+
+        for client_id in to_remove {
+            self.pending_acks.remove(&client_id);
+        }
+
+        Ok(())
+    }
+
+    fn handle_ack(&mut self, client_id: u8, ack: Ack) -> Result<(), Error> {
+        if let Some(pending) = self.pending_acks.get(&client_id) {
+            if ack.acknowledged_sequences.contains(&pending.sequence) {
+                self.pending_acks.remove(&client_id);
+            }
+        }
+
+        Ok(())
     }
 
     fn is_name_taken(&self, name: &str) -> bool {
@@ -157,7 +207,20 @@ impl NeonHost {
         self.next_client_id += 1;
 
         send_connect_accept(&self.socket, self.relay_addr, assigned_id, self.session_id)?;
-        send_session_config(&self.socket, self.relay_addr, assigned_id)?;
+
+        // Delay is needed because the client doesn't have enough time to register otherwise
+        sleep(Duration::from_millis(50));
+
+        let sequence = 2;
+        let config_packet = send_session_config(&self.socket, self.relay_addr, assigned_id, sequence)?;
+
+        self.pending_acks.insert(assigned_id, PendingAck {
+            packet: config_packet,
+            sequence,
+            sent_at: Instant::now(),
+            retry_count: 0,
+        });
+        
         send_packet_type_registry(&self.socket, self.relay_addr, assigned_id)?;
 
         self.connected_clients.insert(assigned_id, req.desired_name.clone());

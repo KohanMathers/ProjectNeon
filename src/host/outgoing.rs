@@ -70,7 +70,8 @@ pub fn send_session_config(
     socket: &NeonSocket,
     relay_addr: SocketAddr,
     assigned_id: u8,
-) -> Result<(), Error> {
+    sequence: u16,
+) -> Result<NeonPacket, Error> {
     let config = SessionConfig {
         version: 1,
         tick_rate: 60,
@@ -79,7 +80,7 @@ pub fn send_session_config(
 
     let config_packet = NeonPacket {
         packet_type: PacketType::SessionConfig as u8,
-        sequence: 2,
+        sequence,
         client_id: assigned_id,
         destination_id: assigned_id,
         payload: PacketPayload::SessionConfig(config),
@@ -87,7 +88,7 @@ pub fn send_session_config(
 
     socket.send_packet(&config_packet, relay_addr)?;
     println!("[Host] Sent SessionConfig to relay for client {}", assigned_id);
-    Ok(())
+    Ok(config_packet)
 }
 
 pub fn send_packet_type_registry(
